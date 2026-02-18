@@ -1,7 +1,7 @@
 import { useAuth } from "@/hooks/useAuth";
 import { Navigate, Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { UserCircle } from "lucide-react";
+import { UserCircle, FileText } from "lucide-react";
 
 const Index = () => {
   const { user, loading, signOut } = useAuth();
@@ -21,7 +21,13 @@ const Index = () => {
       <div className="text-center space-y-4">
         <h1 className="text-4xl font-bold">AHMC AI Test</h1>
         <p className="text-xl text-muted-foreground">Welcome, {user.email}</p>
-        <div className="flex gap-3 justify-center">
+        <div className="flex flex-wrap gap-3 justify-center">
+          <Button asChild>
+            <Link to="/clinical-input">
+              <FileText className="mr-2 h-4 w-4" />
+              Clinical Optimizer
+            </Link>
+          </Button>
           <Button variant="outline" asChild>
             <Link to="/profile">
               <UserCircle className="mr-2 h-4 w-4" />
