@@ -9,6 +9,8 @@ import Auth from "./pages/Auth";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import Profile from "./pages/Profile";
+import ClinicalInput from "./pages/ClinicalInput";
+import ClinicalOutput from "./pages/ClinicalOutput";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -26,6 +28,8 @@ const App = () => (
             <Route path="/forgot-password" element={<ForgotPassword />} />
             <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/profile" element={<Profile />} />
+            <Route path="/clinical-input" element={<ClinicalInput />} />
+            <Route path="/clinical-output" element={<ClinicalOutput />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>
