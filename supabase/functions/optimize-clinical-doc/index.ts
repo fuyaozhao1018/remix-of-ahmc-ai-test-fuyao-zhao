@@ -119,6 +119,20 @@ async function extractAIText(resp: Response): Promise<string> {
   return data.choices?.[0]?.message?.content?.trim() || "";
 }
 
+function extractJSON(text: string): any {
+  // Try to find JSON in markdown code blocks first
+  const codeBlock = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlock) {
+    try { return JSON.parse(codeBlock[1].trim()); } catch {}
+  }
+  // Fall back to finding raw JSON object
+  const m = text.match(/\{[\s\S]*\}/);
+  if (m) {
+    try { return JSON.parse(m[0]); } catch {}
+  }
+  return null;
+}
+
 async function parsePdfBase64(base64: string, label: string): Promise<string> {
   const buf = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
   try {
@@ -139,6 +153,179 @@ Do NOT introduce new diagnoses or contradict the notes.
 If a detail is missing, mark it as not documented or unable to determine.
 Treat the MCG guideline clauses as mandatory admission documentation criteria.`;
 
+// ─── Stage prompts ───────────────────────────────────────────────
+
+function factsExtractionPrompt(sourceNotes: string): string {
+  return `SOURCE NOTES (ER + H&P):
+<<<
+${sourceNotes}
+>>>
+
+Task: Extract structured facts from the source notes ONLY. Output STRICT JSON matching this schema exactly. If a field is not documented, use an empty string "" or empty array []. NEVER invent facts.
+
+{
+  "patient": { "age": "", "sex": "", "language": "", "pmh": [] },
+  "timeline": [],
+  "symptoms_positive": [],
+  "symptoms_negative": [],
+  "outpatient_tx": [],
+  "vitals": {
+    "bp": "", "hr": "", "rr": "", "temp": "",
+    "spo2_ra": "", "spo2_on_o2": "",
+    "o2_device": "", "o2_flow": ""
+  },
+  "exam": [],
+  "imaging": [],
+  "labs": [],
+  "workup": [],
+  "treatments_in_ed": [],
+  "assessment_terms_documented": [],
+  "disposition": {
+    "admitted": false,
+    "reason_documented": []
+  }
+}
+
+Rules:
+- Use ONLY source notes. If missing → empty string / empty array.
+- Never invent facts.
+- Return ONLY the JSON object, no other text.`;
+}
+
+function hpiFromFactsPrompt(factsJSON: string, mcgExcerpts: string): string {
+  return `EXTRACTED FACTS (JSON):
+<<<
+${factsJSON}
+>>>
+
+MCG GUIDELINE EXCERPTS:
+<<<
+${mcgExcerpts}
+>>>
+
+Task: Generate a Revised History of Present Illness (HPI) using ONLY the extracted facts above.
+
+Structure the HPI with these sections in order:
+1. **Chief Complaint & Duration** — What brought the patient in and how long.
+2. **Associated Symptoms & Key Negatives** — Positive symptoms and relevant negatives documented.
+3. **Outpatient Management & Failure** — Prior treatments attempted and why they failed (if documented).
+4. **ED Objective Findings** — Vitals, exam findings, documented in ED.
+5. **Imaging & Labs** — Results documented.
+6. **ED Treatments / Workup** — What was done in the ED.
+7. **Medical Necessity Summary** — MANDATORY. Written in utilization-review language. Every claim must be traceable to the extracted facts. No speculation. Summarize why inpatient admission is medically necessary based on the documented facts.
+
+Rules:
+- Preserve all documented facts from the JSON.
+- Align wording with relevant MCG terms when appropriate.
+- Do NOT add new facts, symptoms, labs, imaging, diagnoses, or assumptions.
+- The Medical Necessity Summary must reference only facts present in the extracted JSON.
+
+Output ONLY the revised HPI text.`;
+}
+
+function missingCriteriaPrompt(mcgForCriteria: string, factsJSON: string, sourceNotes: string): string {
+  return `MCG CRITERIA CLAUSES:
+<<<
+${mcgForCriteria}
+>>>
+
+EXTRACTED FACTS (JSON):
+<<<
+${factsJSON}
+>>>
+
+SOURCE NOTES (for evidence quoting):
+<<<
+${sourceNotes}
+>>>
+
+Task: Compare each MCG guideline clause against the extracted facts AND source notes. For each clause NOT fully supported, create an entry.
+
+Return VALID JSON ONLY in this schema:
+{"missing_criteria":[{"mcg_clause":"...","status":"Not documented","evidence_in_notes":"Direct quote from source notes or 'None'","required_documentation":"What objective documentation is needed"}]}
+
+Status values (use exactly):
+- "Not documented" — not mentioned at all
+- "Insufficient detail" — mentioned but missing objective specifics
+- "Unable to determine" — cannot be concluded from the notes
+
+Rules:
+- evidence_in_notes must be a direct quote from SOURCE NOTES, or "None".
+- Never claim criteria is met unless explicitly documented.
+- Never invent facts.
+- Return ONLY the JSON object.`;
+}
+
+function mappingExplanationPrompt(mcgForCriteria: string, sourceNotes: string, missingCriteriaJSON: string): string {
+  return `MCG CRITERIA CLAUSES:
+<<<
+${mcgForCriteria}
+>>>
+
+SOURCE NOTES (ER + H&P):
+<<<
+${sourceNotes}
+>>>
+
+MISSING CRITERIA JSON:
+<<<
+${missingCriteriaJSON}
+>>>
+
+Task: Write a clear, audit-ready explanation mapping MCG clauses to documentation evidence.
+
+For each item, explain:
+1. The MCG clause requirement
+2. Supporting evidence found in the notes (direct quote) — or state "not documented"
+3. Why it is missing or insufficient
+4. What specific documentation would satisfy the requirement
+
+Rules:
+- Every statement must be traceable to source notes or the missing criteria list.
+- No hallucination or invented facts.
+- Use utilization-review professional language.
+
+Output ONLY the explanation text.`;
+}
+
+function selfAuditPrompt(sourceNotes: string, revisedHPI: string, missingCriteriaJSON: string, mappingExplanation: string): string {
+  return `SOURCE NOTES:
+<<<
+${sourceNotes}
+>>>
+
+Generated Revised HPI:
+<<<
+${revisedHPI}
+>>>
+
+Generated Missing Criteria JSON:
+<<<
+${missingCriteriaJSON}
+>>>
+
+Generated Explanation:
+<<<
+${mappingExplanation}
+>>>
+
+Task: Self-audit all generated outputs against the source notes.
+
+Verify:
+- No unsupported claims exist in the HPI or explanation
+- No invented facts or diagnoses
+- No contradictions with source notes
+- Missing criteria statuses are accurate
+
+Remove or revise any statement not explicitly supported by SOURCE NOTES.
+If unsupported, either delete it or replace with "not documented" language.
+
+Return corrected outputs in JSON:
+{"revised_hpi":"...","missing_criteria":[...],"mapping_explanation":"..."}
+
+Return ONLY the JSON object.`;
+}
+
 // ─── Main handler ────────────────────────────────────────────────
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -157,11 +344,11 @@ Deno.serve(async (req) => {
     const apiKey = Deno.env.get("LOVABLE_API_KEY");
     if (!apiKey) {
       console.error("LOVABLE_API_KEY is not configured");
-      throw new Error("AI API key is not configured. Please contact support.");
+      return errorResponse("AI API key is not configured. Please contact support.", 500);
     }
     console.log("API key validated, starting processing...");
 
-    // 1) Acquire ER Notes text
+    // ── Extract text from inputs ──
     let erNotesText = "";
     if (erText) {
       erNotesText = erText.trim();
@@ -170,11 +357,9 @@ Deno.serve(async (req) => {
     }
     console.log("ER Notes extracted:", erNotesText.length, "chars");
 
-    // 2) Extract H&P text
     const hpText = await parsePdfBase64(hpPdfBase64, "H&P");
     console.log("H&P extracted:", hpText.length, "chars");
 
-    // 3) Extract MCG text
     let mcgText = await parsePdfBase64(mcgPdfBase64, "MCG Guideline");
     console.log("MCG extracted:", mcgText.length, "chars");
 
@@ -185,69 +370,49 @@ Deno.serve(async (req) => {
       console.warn("MCG text truncated to", MAX_GUIDELINE_CHARS, "chars");
     }
 
-    // 4) Chunk MCG & retrieve topK
+    // ═══════════════════════════════════════════════════════════════
+    // STAGE 0: Facts Extraction
+    // ═══════════════════════════════════════════════════════════════
+    console.log("Stage 0: Extracting structured facts...");
+    const factsResp = await callAI(
+      apiKey,
+      [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: factsExtractionPrompt(sourceNotes) }],
+      0.0
+    );
+    if (!factsResp.ok) {
+      const handled = handleAIStatus(factsResp.status);
+      if (handled) return handled;
+      const errText = await factsResp.text();
+      console.error("Stage 0 AI error:", factsResp.status, errText);
+      throw new Error(`AI Gateway returned ${factsResp.status} during facts extraction`);
+    }
+    const factsRaw = await extractAIText(factsResp);
+    const factsObj = extractJSON(factsRaw);
+    if (!factsObj || !factsObj.patient) {
+      console.error("Stage 0: Failed to parse facts JSON. Raw:", factsRaw.slice(0, 500));
+      throw new Error("Failed to extract structured facts from notes. Please try again.");
+    }
+    const factsJSON = JSON.stringify(factsObj, null, 2);
+    console.log("Stage 0 complete. Facts extracted:", factsJSON.length, "chars");
+
+    // ═══════════════════════════════════════════════════════════════
+    // STAGE 2: BM25 Guideline Retrieval
+    // ═══════════════════════════════════════════════════════════════
+    console.log("Stage 2: BM25 guideline retrieval...");
     const mcgChunks = chunkText(mcgText);
     console.log("MCG chunked into", mcgChunks.length, "chunks");
     const topK = scoreBM25(sourceNotes, mcgChunks, 6);
     const mcgExcerpts = topK.join("\n\n---\n\n");
     const mcgForCriteria = mcgText.length < 30000 ? mcgText : mcgExcerpts;
+    console.log("Stage 2 complete. Retrieved", topK.length, "chunks");
 
-    // ═══ Prompt A: Revised HPI ═══
-    const hpiPrompt = `MCG excerpts:
-<<<
-${mcgExcerpts}
->>>
-
-SOURCE NOTES (ER + H&P):
-<<<
-${sourceNotes}
->>>
-
-Task:
-Rewrite the History of Present Illness (HPI) into a clear, professional, logically organized narrative.
-
-Requirements:
-- Preserve all documented facts.
-- Improve structure and clarity.
-- Align wording with relevant MCG terms when appropriate.
-- Emphasize documented severity indicators (only if explicitly documented).
-- Do NOT add new facts, symptoms, labs, imaging, diagnoses, or assumptions.
-
-Output ONLY the revised HPI text.`;
-
-    // ═══ Prompt B: Missing Criteria (strict JSON) ═══
-    const criteriaPrompt = `MCG criteria clauses:
-<<<
-${mcgForCriteria}
->>>
-
-SOURCE NOTES (ER + H&P):
-<<<
-${sourceNotes}
->>>
-
-Task:
-Compare SOURCE NOTES against the MCG criteria.
-For each MCG clause that is NOT fully supported by the notes, create an entry.
-
-Statuses:
-- Not documented: not mentioned at all
-- Insufficient detail: mentioned but missing objective specifics
-- Unable to determine: cannot be concluded from the notes
-
-Return VALID JSON ONLY in this schema:
-{"missing_criteria":[{"mcg_clause":"...","status":"Not documented","evidence_in_notes":"Quote snippet from notes or 'None'","required_documentation":"What objective documentation is needed (do not claim it exists)"}]}
-
-Rules:
-- Evidence must come directly from SOURCE NOTES or be 'None'.
-- Do NOT invent facts.
-- Do NOT claim the patient meets missing criteria.`;
-
-    // Run HPI + Criteria in parallel
-    console.log("Starting AI calls (HPI + Criteria)...");
+    // ═══════════════════════════════════════════════════════════════
+    // STAGE 1 + 3: HPI Generation + Missing Criteria (parallel)
+    // ═══════════════════════════════════════════════════════════════
+    console.log("Stage 1+3: Generating HPI and Missing Criteria in parallel...");
     const [hpiResp, criteriaResp] = await Promise.all([
-      callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: hpiPrompt }], 0.2),
-      callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: criteriaPrompt }], 0.1),
+      callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: hpiFromFactsPrompt(factsJSON, mcgExcerpts) }], 0.2),
+      callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: missingCriteriaPrompt(mcgForCriteria, factsJSON, sourceNotes) }], 0.1),
     ]);
 
     for (const resp of [hpiResp, criteriaResp]) {
@@ -255,157 +420,110 @@ Rules:
         const handled = handleAIStatus(resp.status);
         if (handled) return handled;
         const errText = await resp.text();
-        console.error("AI error:", resp.status, errText);
+        console.error("Stage 1/3 AI error:", resp.status, errText);
         throw new Error(`AI Gateway returned ${resp.status}`);
       }
     }
 
     let revisedHPI = await extractAIText(hpiResp);
     const criteriaContent = await extractAIText(criteriaResp);
-    console.log("HPI generated:", revisedHPI.length, "chars");
-    console.log("Criteria response:", criteriaContent.length, "chars");
+    console.log("Stage 1 complete. HPI:", revisedHPI.length, "chars");
+    console.log("Stage 3 complete. Criteria response:", criteriaContent.length, "chars");
 
     // ── Parse missing criteria with retry ──
+    const validStatuses = new Set(["Not documented", "Insufficient detail", "Unable to determine"]);
     let missingCriteria: Array<{
       mcg_clause: string; status: string;
       evidence_in_notes: string; required_documentation: string;
     }> = [];
     let criteriaParsed = false;
 
-    try {
-      const m = criteriaContent.match(/\{[\s\S]*\}/);
-      if (m) {
-        const obj = JSON.parse(m[0]);
-        if (Array.isArray(obj.missing_criteria)) { missingCriteria = obj.missing_criteria; criteriaParsed = true; }
-      }
-    } catch { console.warn("First criteria parse failed, retrying..."); }
+    const criteriaObj = extractJSON(criteriaContent);
+    if (criteriaObj && Array.isArray(criteriaObj.missing_criteria)) {
+      missingCriteria = criteriaObj.missing_criteria;
+      criteriaParsed = true;
+    }
 
     if (!criteriaParsed) {
-      console.log("Retrying criteria parse...");
+      console.warn("Stage 3: First criteria parse failed, retrying...");
       const retryPrompt = `Your previous response was not valid JSON. Respond with ONLY a JSON object.
-DOCTOR NOTES:\n${sourceNotes}\nMCG GUIDELINE:\n${mcgForCriteria}
+EXTRACTED FACTS:\n${factsJSON}\nMCG GUIDELINE:\n${mcgForCriteria}
 Respond EXACTLY: {"missing_criteria":[{"mcg_clause":"...","status":"Not documented","evidence_in_notes":"...","required_documentation":"..."}]}`;
       const retryResp = await callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: retryPrompt }], 0.0);
       if (retryResp.ok) {
         const retryText = await extractAIText(retryResp);
-        try {
-          const m = retryText.match(/\{[\s\S]*\}/);
-          if (m) { const obj = JSON.parse(m[0]); if (Array.isArray(obj.missing_criteria)) missingCriteria = obj.missing_criteria; }
-        } catch { console.error("Retry parse also failed"); }
+        const retryObj = extractJSON(retryText);
+        if (retryObj && Array.isArray(retryObj.missing_criteria)) {
+          missingCriteria = retryObj.missing_criteria;
+        }
       }
     }
 
     // Validate statuses
-    const validStatuses = new Set(["Not documented", "Insufficient detail", "Unable to determine"]);
     missingCriteria = missingCriteria.filter(c => c.mcg_clause && validStatuses.has(c.status));
+    console.log("Stage 3: Validated", missingCriteria.length, "missing criteria items");
 
-    // ═══ Prompt C: Mapping Explanation ═══
-    console.log("Starting mapping explanation...");
-    const mappingPrompt = `MCG criteria clauses:
-<<<
-${mcgForCriteria}
->>>
-
-SOURCE NOTES (ER + H&P):
-<<<
-${sourceNotes}
->>>
-
-Missing criteria JSON:
-<<<
-${JSON.stringify(missingCriteria)}
->>>
-
-Task:
-Write a clear explanation that maps MCG clauses to documentation evidence.
-
-Requirements:
-- For each missing item, explain:
-  (1) the MCG clause,
-  (2) whether there is any supporting evidence in the notes (or explicitly state 'not documented'),
-  (3) why it is missing/insufficient,
-  (4) what documentation would be needed.
-- Keep it audit-ready and traceable.
-- Do NOT invent facts.
-
-Output only the explanation text.`;
-
-    const mappingResp = await callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: mappingPrompt }], 0.2);
+    // ═══════════════════════════════════════════════════════════════
+    // STAGE 4: Mapping Explanation
+    // ═══════════════════════════════════════════════════════════════
+    console.log("Stage 4: Generating mapping explanation...");
+    const mappingResp = await callAI(
+      apiKey,
+      [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: mappingExplanationPrompt(mcgForCriteria, sourceNotes, JSON.stringify(missingCriteria)) }],
+      0.2
+    );
     if (!mappingResp.ok) {
       const handled = handleAIStatus(mappingResp.status);
       if (handled) return handled;
       throw new Error(`AI Gateway returned ${mappingResp.status}`);
     }
     const mappingExplanation = await extractAIText(mappingResp);
-    console.log("Mapping explanation generated:", mappingExplanation.length, "chars");
+    console.log("Stage 4 complete. Mapping:", mappingExplanation.length, "chars");
 
-    // ═══ Prompt D: Self-Audit ═══
-    console.log("Starting self-audit...");
-    const auditPrompt = `SOURCE NOTES:
-<<<
-${sourceNotes}
->>>
-
-Generated Revised HPI:
-<<<
-${revisedHPI}
->>>
-
-Generated Missing Criteria JSON:
-<<<
-${JSON.stringify(missingCriteria)}
->>>
-
-Generated Explanation:
-<<<
-${mappingExplanation}
->>>
-
-Task:
-Remove or revise any statement that is not explicitly supported by SOURCE NOTES.
-If unsupported, either delete it or replace it with 'not documented' language.
-
-Return corrected outputs in JSON:
-{"revised_hpi":"...","missing_criteria":[...],"mapping_explanation":"..."}
-
-Return JSON only.`;
-
-    const auditResp = await callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: auditPrompt }], 0.1);
+    // ═══════════════════════════════════════════════════════════════
+    // STAGE 5: Self-Audit
+    // ═══════════════════════════════════════════════════════════════
+    console.log("Stage 5: Running self-audit...");
+    const auditResp = await callAI(
+      apiKey,
+      [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: selfAuditPrompt(sourceNotes, revisedHPI, JSON.stringify(missingCriteria), mappingExplanation) }],
+      0.1
+    );
     if (auditResp.ok) {
       const auditText = await extractAIText(auditResp);
-      try {
-        const m = auditText.match(/\{[\s\S]*\}/);
-        if (m) {
-          const audited = JSON.parse(m[0]);
-          if (audited.revised_hpi) revisedHPI = audited.revised_hpi;
-          if (Array.isArray(audited.missing_criteria)) {
-            missingCriteria = audited.missing_criteria.filter(
-              (c: any) => c.mcg_clause && validStatuses.has(c.status)
-            );
-          }
-          if (audited.mapping_explanation) {
-            console.log("AI success - self-audit applied. Output sizes:", {
-              hpi: revisedHPI.length,
-              criteria: missingCriteria.length,
-              mapping: audited.mapping_explanation.length,
-            });
-            return new Response(JSON.stringify({
-              revised_hpi: revisedHPI,
-              missing_criteria: missingCriteria,
-              mapping_explanation: audited.mapping_explanation,
-            }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-          }
+      const audited = extractJSON(auditText);
+      if (audited) {
+        if (audited.revised_hpi) revisedHPI = audited.revised_hpi;
+        if (Array.isArray(audited.missing_criteria)) {
+          missingCriteria = audited.missing_criteria.filter(
+            (c: any) => c.mcg_clause && validStatuses.has(c.status)
+          );
         }
-      } catch { console.warn("Self-audit JSON parse failed, using pre-audit outputs"); }
+        if (audited.mapping_explanation) {
+          console.log("Stage 5 complete. Self-audit applied. Output sizes:", {
+            hpi: revisedHPI.length,
+            criteria: missingCriteria.length,
+            mapping: audited.mapping_explanation.length,
+          });
+          return new Response(JSON.stringify({
+            revised_hpi: revisedHPI,
+            missing_criteria: missingCriteria,
+            mapping_explanation: audited.mapping_explanation,
+          }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+      }
+      console.warn("Stage 5: Self-audit JSON parse failed, using pre-audit outputs");
+    } else {
+      console.warn("Stage 5: Self-audit call failed, using pre-audit outputs");
     }
 
-    // Validate final output completeness
-    if (!revisedHPI || missingCriteria === undefined || !mappingExplanation) {
-      console.error("Incomplete AI output", { hpi: !!revisedHPI, criteria: !!missingCriteria, mapping: !!mappingExplanation });
+    // ── Final validation ──
+    if (!revisedHPI || !mappingExplanation) {
+      console.error("Incomplete AI output", { hpi: !!revisedHPI, criteria: missingCriteria.length, mapping: !!mappingExplanation });
       throw new Error("Incomplete AI output. Please try again.");
     }
 
-    console.log("AI success - pre-audit outputs used. Output sizes:", {
+    console.log("AI success (pre-audit). Output sizes:", {
       hpi: revisedHPI.length,
       criteria: missingCriteria.length,
       mapping: mappingExplanation.length,

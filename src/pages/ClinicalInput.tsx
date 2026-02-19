@@ -24,11 +24,11 @@ async function fileToBase64(file: File): Promise<string> {
 
 const PROGRESS_STEPS = [
   "Extracting PDF text...",
-  "Analyzing criteria...",
-  "Generating revised HPI...",
-  "Generating missing criteria...",
-  "Generating mapping explanation...",
-  "Running self-audit...",
+  "Stage 0: Extracting structured facts...",
+  "Stage 1+2: Retrieving guidelines & generating HPI...",
+  "Stage 3: Analyzing missing criteria...",
+  "Stage 4: Generating mapping explanation...",
+  "Stage 5: Running self-audit...",
 ];
 
 const ClinicalInput = () => {
