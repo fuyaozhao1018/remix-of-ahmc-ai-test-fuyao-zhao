@@ -165,8 +165,21 @@ const ClinicalOutput = () => {
               <CopyBtn textKey="explanation" text={result.mapping_explanation} />
             </CardHeader>
             <CardContent>
-              <div className="whitespace-pre-wrap text-sm text-foreground leading-relaxed">
-                {result.mapping_explanation}
+              <div className="space-y-4">
+                {result.mapping_explanation.split("---").map((block, i, arr) => {
+                  const trimmed = block.trim();
+                  if (!trimmed) return null;
+                  return (
+                    <div key={i}>
+                      <div className="whitespace-pre-wrap text-sm text-foreground leading-relaxed">
+                        {trimmed}
+                      </div>
+                      {i < arr.length - 1 && arr[i + 1]?.trim() && (
+                        <hr className="mt-4 border-border" />
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </CardContent>
           </Card>
