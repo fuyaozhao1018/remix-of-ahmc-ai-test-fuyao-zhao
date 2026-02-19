@@ -10,9 +10,16 @@ import { ArrowLeft, Upload, FileText, Loader2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 
+export interface MissingCriterion {
+  criterion: string;
+  status: "Not mentioned" | "Insufficient detail" | "Unable to determine";
+  what_to_document: string;
+}
+
 export interface ClinicalResult {
-  revisedHPI: string;
-  missingCriteria: string[];
+  revised_hpi: string;
+  missing_criteria: MissingCriterion[];
+  debug?: { top_k_chunks?: string[] };
 }
 
 // Shared state to preserve inputs and results across navigation
