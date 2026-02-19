@@ -81,16 +81,64 @@ const ClinicalOutput = () => {
     }
   };
 
-  const handleDownload = () => {
-    const content = `REVISED HPI\n${"=".repeat(40)}\n${result.revised_hpi}\n\n\nMISSING CRITERIA\n${"=".repeat(40)}\n${missingListText}\n\n\nMAPPING EXPLANATION\n${"=".repeat(40)}\n${result.mapping_explanation}`;
-    const blob = new Blob([content], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "clinical-output.txt";
-    a.click();
-    URL.revokeObjectURL(url);
-    toast({ title: "Downloaded clinical-output.txt" });
+  const handleDownload = async () => {
+    const { default: jsPDF } = await import("jspdf");
+    const doc = new jsPDF({ unit: "pt", format: "letter" });
+    const margin = 50;
+    const pageWidth = doc.internal.pageSize.getWidth() - margin * 2;
+    let y = margin;
+
+    const addText = (text: string, fontSize: number, bold = false) => {
+      doc.setFontSize(fontSize);
+      doc.setFont("helvetica", bold ? "bold" : "normal");
+      const lines = doc.splitTextToSize(text, pageWidth);
+      for (const line of lines) {
+        if (y + fontSize * 1.4 > doc.internal.pageSize.getHeight() - margin) {
+          doc.addPage();
+          y = margin;
+        }
+        doc.text(line, margin, y);
+        y += fontSize * 1.4;
+      }
+    };
+
+    const addSpacing = (pts: number) => { y += pts; };
+
+    // Title
+    addText("Clinical Documentation Optimization Report", 16, true);
+    addSpacing(8);
+    addText(`Generated: ${new Date().toLocaleDateString()}`, 9);
+    addSpacing(16);
+
+    // Section 1: Revised HPI
+    addText("REVISED HPI", 13, true);
+    addSpacing(6);
+    addText(result.revised_hpi, 10);
+    addSpacing(20);
+
+    // Section 2: Missing Criteria
+    addText("MISSING CRITERIA", 13, true);
+    addSpacing(6);
+    result.missing_criteria.forEach((item, i) => {
+      addText(`${i + 1}. [${item.status}] ${item.mcg_clause}`, 10, true);
+      addText(`   Evidence: ${item.evidence_in_notes}`, 9);
+      addText(`   Required: ${item.required_documentation}`, 9);
+      addSpacing(8);
+    });
+    addSpacing(12);
+
+    // Section 3: Mapping Explanation
+    addText("MAPPING EXPLANATION", 13, true);
+    addSpacing(6);
+    result.mapping_explanation.split("---").forEach(block => {
+      const trimmed = block.trim();
+      if (!trimmed) return;
+      addText(trimmed, 10);
+      addSpacing(10);
+    });
+
+    doc.save("clinical-output.pdf");
+    toast({ title: "Downloaded clinical-output.pdf" });
   };
 
   return (
@@ -104,7 +152,7 @@ const ClinicalOutput = () => {
           </Button>
           <Button variant="outline" size="sm" onClick={handleDownload}>
             <Download className="mr-2 h-4 w-4" />
-            Download
+            Download PDF
           </Button>
         </div>
 
