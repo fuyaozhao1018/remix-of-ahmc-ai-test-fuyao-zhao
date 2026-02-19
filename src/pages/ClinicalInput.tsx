@@ -157,8 +157,14 @@ const ClinicalInput = () => {
       const parsed = typeof data === "string" ? JSON.parse(data) : data;
       if (parsed?.error) throw new Error(parsed.error);
 
+      // Validate response shape
+      if (!parsed?.revised_hpi || !Array.isArray(parsed?.missing_criteria) || !parsed?.mapping_explanation) {
+        throw new Error("Invalid response shape from backend.");
+      }
+
       const result: ClinicalResult = parsed;
       savedResult = result;
+      localStorage.setItem("clinical_result", JSON.stringify(result));
       navigate("/clinical-output");
     } catch (err: any) {
       setError(err.message || "An error occurred while processing.");
