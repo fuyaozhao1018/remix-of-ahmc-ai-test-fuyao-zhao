@@ -103,6 +103,7 @@ const ClinicalInput = () => {
   };
 
   const handleGenerate = async () => {
+    console.log("handleGenerate called", { erMode, erFile: !!erFile, erText: erText.length, hpFile: !!hpFile, mcgFile: !!mcgFile });
     // Validate
     if (erMode === "upload" && !erFile) {
       setError("ER Notes PDF is required.");
