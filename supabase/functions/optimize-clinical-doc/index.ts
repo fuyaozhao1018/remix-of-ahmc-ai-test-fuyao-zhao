@@ -241,8 +241,17 @@ STRUCTURE (weave ALL into ONE continuous paragraph, no headers):
    - Oxygen: "Documented hypoxemia requiring supplemental oxygen" (only if SpO2 drop + O2 administration documented)
    - If the notes explicitly state a diagnosis (e.g., "acute hypoxic respiratory failure"), include it. Otherwise do NOT invent diagnoses.
    - For elevated BUN without explicit dehydration diagnosis, say "BUN elevated; volume status should be assessed" rather than "suggesting dehydration".
-6. Mention ED treatments that support inpatient need (IV antibiotics, oxygen, etc.).
-7. End with a concise "In summary" sentence tying together: progressive/worsening symptoms, failed outpatient therapy (if any), documented hypoxemia/O2 requirement, imaging evidence, lab evidence, and need for inpatient monitoring/treatment.
+6. RULE-BASED CLINICAL INFERENCE (ALLOWED AND ENCOURAGED):
+   When laboratory values, imaging findings, or objective vitals STRONGLY support a well-established, widely accepted medical conclusion, you SHOULD explicitly state the clinical implication to strengthen medical necessity. Examples:
+   - Leukocytosis with neutrophilic predominance or left shift → "consistent with acute bacterial infection"
+   - Elevated lactate → "suggestive of tissue hypoperfusion or sepsis"
+   - Chest imaging showing infiltrate/consolidation + fever/cough → "imaging findings consistent with pneumonia"
+   - SpO2 < 90% on room air → "documented hypoxemia indicating need for supplemental oxygen"
+   - Elevated procalcitonin → "elevated procalcitonin supporting bacterial etiology"
+   This is ONLY allowed when: (a) the conclusion is directly supported by documented lab values, imaging, or vitals, (b) the conclusion is medically standard and widely accepted, and (c) no new facts are introduced beyond what is in the extracted JSON.
+   You MUST NOT: infer diagnoses without objective support, add speculative or uncertain interpretations, or override missing documentation.
+7. Mention ED treatments that support inpatient need (IV antibiotics, oxygen, etc.).
+8. End with a concise "In summary" sentence tying together: progressive/worsening symptoms, failed outpatient therapy (if any), documented hypoxemia/O2 requirement, imaging evidence, lab evidence, and need for inpatient monitoring/treatment.
 
 MUST EXCLUDE:
 - Negative ROS or denial statements ("denies chest pain", "denies fever") unless directly supporting medical necessity for the primary diagnosis.
