@@ -80,6 +80,37 @@ function scoreBM25(query: string, chunks: string[], k = 6): string[] {
   return scores.sort((a, b) => b.score - a.score).slice(0, k).map(s => chunks[s.index]);
 }
 
+// ─── Sanitization helpers ────────────────────────────────────────
+function stripMarkdown(text: string): string {
+  return text.replace(/###?\s*/g, "").replace(/\*\*/g, "").replace(/\*/g, "").replace(/`/g, "").replace(/^[-•]\s*/gm, "");
+}
+
+function sanitizeHPI(hpi: string): string {
+  return stripMarkdown(hpi).replace(/\n+/g, " ").replace(/\s{2,}/g, " ").trim();
+}
+
+function sanitizeMapping(mapping: string): string {
+  let text = stripMarkdown(mapping);
+  // Normalize separator lines to consistent format
+  text = text.replace(/\n*-{3,}\n*/g, "\n---\n");
+  // If no separators exist, try to insert them between items based on "Clause:" pattern
+  if (!text.includes("---")) {
+    text = text.replace(/\n(?=Clause:)/g, "\n---\n");
+  }
+  // Ensure each item ends with separator (except last)
+  const items = text.split("\n---\n").map(s => s.trim()).filter(Boolean);
+  return items.join("\n---\n");
+}
+
+function sanitizeCriteria(criteria: any[]): any[] {
+  return criteria.map(c => ({
+    ...c,
+    mcg_clause: stripMarkdown(c.mcg_clause || "").trim(),
+    evidence_in_notes: stripMarkdown(c.evidence_in_notes || "").trim(),
+    required_documentation: stripMarkdown(c.required_documentation || "").trim(),
+  }));
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────
 const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
 const MAX_NOTES_CHARS = 15000;
@@ -203,17 +234,30 @@ MCG GUIDELINE EXCERPTS:
 ${mcgExcerpts}
 >>>
 
-Task: Generate a Revised History of Present Illness (HPI) using ONLY the extracted facts above.
+Task: Generate a CONCISE Revised History of Present Illness (HPI) using ONLY the extracted facts above.
 
-Return ONE PARAGRAPH of continuous narrative text only. No headings. No section labels. No bullet points. No Markdown. No asterisks. No bold. No line breaks between sections. Use sentences and transitions to weave together: chief complaint and duration, associated symptoms and key negatives, outpatient management and failure, ED objective findings (vitals, exam), imaging and labs, ED treatments/workup, and a Medical Necessity Summary written in utilization-review language where every claim is traceable to the extracted facts with no speculation.
+LENGTH REQUIREMENT: 8-14 sentences maximum, under 1500 characters. Be concise and medically relevant.
 
-Rules:
-- Preserve all documented facts from the JSON.
-- Align wording with relevant MCG terms when appropriate.
-- Do NOT add new facts, symptoms, labs, imaging, diagnoses, or assumptions.
-- The Medical Necessity Summary must reference only facts present in the extracted JSON.
-- ABSOLUTELY NO Markdown formatting: no **, no *, no #, no backticks, no bullet symbols.
-- Output must be a single continuous paragraph with no line breaks.
+CONTENT TO INCLUDE (briefly):
+- Chief complaint and duration
+- Key associated symptoms and key negatives relevant to the diagnosis
+- Outpatient treatment failure (if any)
+- Objective ED findings relevant to severity (SpO2/oxygen requirement, RR if abnormal)
+- Key imaging findings
+- Key labs relevant to infection/respiratory status
+- ED treatment that supports admission
+- Admission rationale (1-2 sentences in utilization-review language)
+
+CONTENT TO EXCLUDE:
+- Long negative exam checklists (no listing of unremarkable body systems). If needed, use ONE short sentence: "Other exam findings were unremarkable as documented."
+- Irrelevant negatives not related to the primary diagnosis
+- Redundant details already implied
+
+FORMAT RULES:
+- Return ONE PARAGRAPH of continuous narrative text only.
+- No headings, no section labels, no bullet points, no Markdown, no asterisks, no bold, no line breaks.
+- Plain text only.
+- Do NOT add any facts not present in the extracted JSON.
 
 Output ONLY the revised HPI text as one paragraph.`;
 }
@@ -267,22 +311,27 @@ MISSING CRITERIA JSON:
 ${missingCriteriaJSON}
 >>>
 
-Task: Write a clear, audit-ready explanation mapping MCG clauses to documentation evidence.
+Task: Write a clear, audit-ready explanation for EACH missing criterion, in the SAME ORDER as the missing_criteria JSON array.
 
-For each item, explain:
-1. The MCG clause requirement
-2. Supporting evidence found in the notes (direct quote) — or state "not documented"
-3. Why it is missing or insufficient
-4. What specific documentation would satisfy the requirement
+Use this EXACT template for each item (copy the labels exactly):
+
+Clause: <mcg_clause text>
+Status: <status value>
+Evidence from notes: "<direct quote from source notes>" (or "None")
+Why missing/insufficient: <1-2 sentences explaining the gap>
+Needed documentation: <1 sentence stating what is required>
+
+Separate each item with a line containing only three dashes: ---
 
 Rules:
+- Follow the template exactly for every item. Do not skip any field.
+- Evidence must be a direct quote from the source notes in quotes, or exactly "None".
+- Do not fabricate numeric thresholds unless they appear in the MCG text.
 - Every statement must be traceable to source notes or the missing criteria list.
-- No hallucination or invented facts.
-- Use utilization-review professional language.
-- Return plain text only. No Markdown. No bullets. No * or **. No headings. No backticks.
-- Use numbered items or plain sentences for structure.
+- Plain text only. No Markdown. No bullets. No asterisks. No bold. No headings. No backticks.
+- Do not use numbered lists (no "1.", "2.", etc.). Use the template labels only.
 
-Output ONLY the explanation text in plain text format.`;
+Output ONLY the explanation text.`;
 }
 
 function selfAuditPrompt(sourceNotes: string, revisedHPI: string, missingCriteriaJSON: string, mappingExplanation: string): string {
@@ -497,15 +546,9 @@ Respond EXACTLY: {"missing_criteria":[{"mcg_clause":"...","status":"Not document
           );
         }
         if (audited.mapping_explanation) {
-          // Sanitize markdown from audited outputs
-          revisedHPI = revisedHPI.replace(/###?\s*/g, "").replace(/\*\*/g, "").replace(/\*/g, "").replace(/`/g, "").replace(/^[-•]\s*/gm, "").replace(/\n+/g, " ").replace(/\s{2,}/g, " ").trim();
-          const sanitizedMapping = audited.mapping_explanation.replace(/###?\s*/g, "").replace(/\*\*/g, "").replace(/\*/g, "").replace(/`/g, "").replace(/^[-•]\s*/gm, "").replace(/\s{2,}/g, " ").trim();
-          missingCriteria = missingCriteria.map((c: any) => ({
-            ...c,
-            mcg_clause: (c.mcg_clause || "").replace(/\*\*/g, "").replace(/\*/g, "").replace(/`/g, ""),
-            evidence_in_notes: (c.evidence_in_notes || "").replace(/\*\*/g, "").replace(/\*/g, "").replace(/`/g, ""),
-            required_documentation: (c.required_documentation || "").replace(/\*\*/g, "").replace(/\*/g, "").replace(/`/g, ""),
-          }));
+          revisedHPI = sanitizeHPI(revisedHPI);
+          const sanitizedMapping = sanitizeMapping(audited.mapping_explanation);
+          missingCriteria = sanitizeCriteria(missingCriteria);
           console.log("Stage 5 complete. Self-audit applied. Output sizes:", {
             hpi: revisedHPI.length,
             criteria: missingCriteria.length,
@@ -529,15 +572,10 @@ Respond EXACTLY: {"missing_criteria":[{"mcg_clause":"...","status":"Not document
       throw new Error("Incomplete AI output. Please try again.");
     }
 
-    // ── Sanitize Markdown from all outputs ──
-    revisedHPI = revisedHPI.replace(/###?\s*/g, "").replace(/\*\*/g, "").replace(/\*/g, "").replace(/`/g, "").replace(/^[-•]\s*/gm, "").replace(/\n+/g, " ").replace(/\s{2,}/g, " ").trim();
-    let finalMapping = mappingExplanation.replace(/###?\s*/g, "").replace(/\*\*/g, "").replace(/\*/g, "").replace(/`/g, "").replace(/^[-•]\s*/gm, "").replace(/\s{2,}/g, " ").trim();
-    missingCriteria = missingCriteria.map(c => ({
-      ...c,
-      mcg_clause: (c.mcg_clause || "").replace(/\*\*/g, "").replace(/\*/g, "").replace(/`/g, ""),
-      evidence_in_notes: (c.evidence_in_notes || "").replace(/\*\*/g, "").replace(/\*/g, "").replace(/`/g, ""),
-      required_documentation: (c.required_documentation || "").replace(/\*\*/g, "").replace(/\*/g, "").replace(/`/g, ""),
-    }));
+    // ── Sanitize all outputs ──
+    revisedHPI = sanitizeHPI(revisedHPI);
+    let finalMapping = sanitizeMapping(mappingExplanation);
+    missingCriteria = sanitizeCriteria(missingCriteria);
 
     console.log("AI success (pre-audit). Output sizes:", {
       hpi: revisedHPI.length,
