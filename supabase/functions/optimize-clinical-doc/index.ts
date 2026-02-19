@@ -234,30 +234,34 @@ MCG GUIDELINE EXCERPTS:
 ${mcgExcerpts}
 >>>
 
-Task: Generate a CONCISE Revised History of Present Illness (HPI) using ONLY the extracted facts above.
+Task: Generate a CONCISE, payer-friendly Revised History of Present Illness (HPI) using ONLY the extracted facts above.
 
-LENGTH REQUIREMENT: 8-14 sentences maximum, under 1500 characters. Be concise and medically relevant.
+LENGTH: 6-10 sentences total, under 1500 characters. Every sentence must support medical necessity.
 
-CONTENT TO INCLUDE (briefly):
+REQUIRED CONTENT (weave into a single narrative paragraph):
 - Chief complaint and duration
-- Key associated symptoms and key negatives relevant to the diagnosis
-- Outpatient treatment failure (if any)
-- Objective ED findings relevant to severity (SpO2/oxygen requirement, RR if abnormal)
-- Key imaging findings
-- Key labs relevant to infection/respiratory status
-- ED treatment that supports admission
-- Admission rationale (1-2 sentences in utilization-review language)
+- Key associated symptoms directly relevant to the primary diagnosis
+- Outpatient treatment and its failure (if documented)
+- Objective ED findings relevant to severity (SpO2, oxygen requirement, RR if abnormal)
+- Clinical INTERPRETATIONS supported by the notes:
+  * Imaging interpretation (e.g., "CXR findings suggest right lower lobe pneumonia" if notes show infiltrate)
+  * Lab interpretation (e.g., "leukocytosis with neutrophilic predominance suggests acute bacterial infection" if labs show WBC elevation + neutrophilia)
+  * Oxygen interpretation (e.g., "documented hypoxemia requiring supplemental oxygen" if SpO2 drops and O2 is given)
+  IMPORTANT: Only write interpretations directly supported by the provided notes. Never invent.
+- ED treatments that support need for admission
+- End with a concise "In summary" or "Therefore" sentence tying risks + objective findings to inpatient-level need. Example pattern: "In summary, [patient description] with [progressive symptoms], [failed outpatient therapy], [documented objective findings], and [evidence of acute condition] warrants inpatient-level management."
 
-CONTENT TO EXCLUDE:
-- Long negative exam checklists (no listing of unremarkable body systems). If needed, use ONE short sentence: "Other exam findings were unremarkable as documented."
-- Irrelevant negatives not related to the primary diagnosis
-- Redundant details already implied
+MUST EXCLUDE:
+- Negative ROS or denial statements (no "denies chest pain", "denies fever") UNLESS they directly support medical necessity for the primary diagnosis
+- Normal exam checklists or laundry lists of unremarkable findings (no "no cervical tenderness, no AROM pain, no CVAT, no murmur" etc.)
+- If needed, use ONE short sentence: "Other exam findings were unremarkable as documented."
+- Any facts not explicitly present in the extracted JSON
 
 FORMAT RULES:
 - Return ONE PARAGRAPH of continuous narrative text only.
 - No headings, no section labels, no bullet points, no Markdown, no asterisks, no bold, no line breaks.
 - Plain text only.
-- Do NOT add any facts not present in the extracted JSON.
+- Use smooth sentence transitions to connect the content naturally.
 
 Output ONLY the revised HPI text as one paragraph.`;
 }
@@ -311,11 +315,11 @@ MISSING CRITERIA JSON:
 ${missingCriteriaJSON}
 >>>
 
-Task: Write a clear, audit-ready explanation for EACH missing criterion, in the SAME ORDER as the missing_criteria JSON array.
+Task: Write a clear, audit-ready explanation for EACH missing criterion, in the SAME ORDER and SAME NUMBERING as the missing_criteria JSON array.
 
-Use this EXACT template for each item (copy the labels exactly):
+Use this EXACT template for each item (number them 1, 2, 3... matching the array order):
 
-Clause: <mcg_clause text>
+[number]. Clause: <mcg_clause text>
 Status: <status value>
 Evidence from notes: "<direct quote from source notes>" (or "None")
 Why missing/insufficient: <1-2 sentences explaining the gap>
@@ -324,12 +328,13 @@ Needed documentation: <1 sentence stating what is required>
 Separate each item with a line containing only three dashes: ---
 
 Rules:
+- Number each item sequentially (1, 2, 3...) matching the missing_criteria array index.
 - Follow the template exactly for every item. Do not skip any field.
 - Evidence must be a direct quote from the source notes in quotes, or exactly "None".
 - Do not fabricate numeric thresholds unless they appear in the MCG text.
 - Every statement must be traceable to source notes or the missing criteria list.
 - Plain text only. No Markdown. No bullets. No asterisks. No bold. No headings. No backticks.
-- Do not use numbered lists (no "1.", "2.", etc.). Use the template labels only.
+- Keep each explanation concise: 3-4 sentences per item maximum.
 
 Output ONLY the explanation text.`;
 }
