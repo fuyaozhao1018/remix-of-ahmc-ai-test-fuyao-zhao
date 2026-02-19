@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ArrowLeft, Copy, Check } from "lucide-react";
 import { getSavedResult, ClinicalResult } from "./ClinicalInput";
 import { useToast } from "@/hooks/use-toast";
+import { Badge } from "@/components/ui/badge";
 
 const ClinicalOutput = () => {
   const { user, loading } = useAuth();
@@ -31,10 +32,7 @@ const ClinicalOutput = () => {
   }
 
   if (!user) return <Navigate to="/auth" replace />;
-
-  if (!result) {
-    return <Navigate to="/clinical-input" replace />;
-  }
+  if (!result) return <Navigate to="/clinical-input" replace />;
 
   const copyToClipboard = async (text: string, type: "hpi" | "list") => {
     await navigator.clipboard.writeText(text);
@@ -48,7 +46,17 @@ const ClinicalOutput = () => {
     toast({ title: "Copied to clipboard" });
   };
 
-  const missingListText = result.missingCriteria.map((item, i) => `${i + 1}. ${item}`).join("\n");
+  const missingListText = result.missing_criteria
+    .map((item, i) => `${i + 1}. [${item.status}] ${item.criterion}\n   → ${item.what_to_document}`)
+    .join("\n\n");
+
+  const statusVariant = (status: string) => {
+    switch (status) {
+      case "Not mentioned": return "destructive";
+      case "Insufficient detail": return "secondary";
+      default: return "outline";
+    }
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -70,7 +78,7 @@ const ClinicalOutput = () => {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => copyToClipboard(result.revisedHPI, "hpi")}
+                onClick={() => copyToClipboard(result.revised_hpi, "hpi")}
               >
                 {copiedHPI ? (
                   <><Check className="mr-1 h-3 w-3" /> Copied</>
@@ -81,7 +89,7 @@ const ClinicalOutput = () => {
             </CardHeader>
             <CardContent>
               <div className="whitespace-pre-wrap text-sm text-foreground leading-relaxed">
-                {result.revisedHPI}
+                {result.revised_hpi}
               </div>
             </CardContent>
           </Card>
@@ -103,14 +111,23 @@ const ClinicalOutput = () => {
               </Button>
             </CardHeader>
             <CardContent>
-              {result.missingCriteria.length === 0 ? (
+              {result.missing_criteria.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No missing criteria found.</p>
               ) : (
-                <ul className="space-y-2">
-                  {result.missingCriteria.map((item, index) => (
-                    <li key={index} className="flex gap-3 text-sm text-foreground">
-                      <span className="font-semibold text-muted-foreground">{index + 1}.</span>
-                      <span>{item}</span>
+                <ul className="space-y-4">
+                  {result.missing_criteria.map((item, index) => (
+                    <li key={index} className="rounded-md border border-border p-3 space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="text-sm font-medium text-foreground">
+                          {index + 1}. {item.criterion}
+                        </span>
+                        <Badge variant={statusVariant(item.status) as any} className="shrink-0 text-xs">
+                          {item.status}
+                        </Badge>
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        <span className="font-medium">Document:</span> {item.what_to_document}
+                      </p>
                     </li>
                   ))}
                 </ul>
