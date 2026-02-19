@@ -84,6 +84,7 @@ function scoreBM25(query: string, chunks: string[], k = 6): string[] {
 const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
 const MAX_NOTES_CHARS = 15000;
 const MAX_GUIDELINE_CHARS = 80000;
+const AI_TIMEOUT_MS = 60000;
 
 function errorResponse(msg: string, status = 400) {
   return new Response(JSON.stringify({ error: msg }), {
@@ -98,11 +99,19 @@ function handleAIStatus(status: number) {
 }
 
 async function callAI(apiKey: string, messages: Array<{ role: string; content: string }>, temperature = 0.2) {
-  return fetch(AI_URL, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "google/gemini-2.5-flash", messages, temperature }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  try {
+    const resp = await fetch(AI_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "google/gemini-2.5-flash", messages, temperature }),
+      signal: controller.signal,
+    });
+    return resp;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function extractAIText(resp: Response): Promise<string> {
@@ -146,7 +155,11 @@ Deno.serve(async (req) => {
     if (!mcgPdfBase64) return errorResponse("MCG Guideline PDF is required.");
 
     const apiKey = Deno.env.get("LOVABLE_API_KEY");
-    if (!apiKey) throw new Error("LOVABLE_API_KEY not configured");
+    if (!apiKey) {
+      console.error("LOVABLE_API_KEY is not configured");
+      throw new Error("AI API key is not configured. Please contact support.");
+    }
+    console.log("API key validated, starting processing...");
 
     // 1) Acquire ER Notes text
     let erNotesText = "";
@@ -155,12 +168,15 @@ Deno.serve(async (req) => {
     } else {
       erNotesText = await parsePdfBase64(erPdfBase64, "ER Notes");
     }
+    console.log("ER Notes extracted:", erNotesText.length, "chars");
 
     // 2) Extract H&P text
     const hpText = await parsePdfBase64(hpPdfBase64, "H&P");
+    console.log("H&P extracted:", hpText.length, "chars");
 
     // 3) Extract MCG text
     let mcgText = await parsePdfBase64(mcgPdfBase64, "MCG Guideline");
+    console.log("MCG extracted:", mcgText.length, "chars");
 
     // Enforce limits
     const sourceNotes = (erNotesText + "\n\n" + hpText).slice(0, MAX_NOTES_CHARS);
@@ -171,6 +187,7 @@ Deno.serve(async (req) => {
 
     // 4) Chunk MCG & retrieve topK
     const mcgChunks = chunkText(mcgText);
+    console.log("MCG chunked into", mcgChunks.length, "chunks");
     const topK = scoreBM25(sourceNotes, mcgChunks, 6);
     const mcgExcerpts = topK.join("\n\n---\n\n");
     const mcgForCriteria = mcgText.length < 30000 ? mcgText : mcgExcerpts;
@@ -227,6 +244,7 @@ Rules:
 - Do NOT claim the patient meets missing criteria.`;
 
     // Run HPI + Criteria in parallel
+    console.log("Starting AI calls (HPI + Criteria)...");
     const [hpiResp, criteriaResp] = await Promise.all([
       callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: hpiPrompt }], 0.2),
       callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: criteriaPrompt }], 0.1),
@@ -244,6 +262,8 @@ Rules:
 
     let revisedHPI = await extractAIText(hpiResp);
     const criteriaContent = await extractAIText(criteriaResp);
+    console.log("HPI generated:", revisedHPI.length, "chars");
+    console.log("Criteria response:", criteriaContent.length, "chars");
 
     // ── Parse missing criteria with retry ──
     let missingCriteria: Array<{
@@ -261,6 +281,7 @@ Rules:
     } catch { console.warn("First criteria parse failed, retrying..."); }
 
     if (!criteriaParsed) {
+      console.log("Retrying criteria parse...");
       const retryPrompt = `Your previous response was not valid JSON. Respond with ONLY a JSON object.
 DOCTOR NOTES:\n${sourceNotes}\nMCG GUIDELINE:\n${mcgForCriteria}
 Respond EXACTLY: {"missing_criteria":[{"mcg_clause":"...","status":"Not documented","evidence_in_notes":"...","required_documentation":"..."}]}`;
@@ -279,6 +300,7 @@ Respond EXACTLY: {"missing_criteria":[{"mcg_clause":"...","status":"Not document
     missingCriteria = missingCriteria.filter(c => c.mcg_clause && validStatuses.has(c.status));
 
     // ═══ Prompt C: Mapping Explanation ═══
+    console.log("Starting mapping explanation...");
     const mappingPrompt = `MCG criteria clauses:
 <<<
 ${mcgForCriteria}
@@ -315,8 +337,10 @@ Output only the explanation text.`;
       throw new Error(`AI Gateway returned ${mappingResp.status}`);
     }
     const mappingExplanation = await extractAIText(mappingResp);
+    console.log("Mapping explanation generated:", mappingExplanation.length, "chars");
 
     // ═══ Prompt D: Self-Audit ═══
+    console.log("Starting self-audit...");
     const auditPrompt = `SOURCE NOTES:
 <<<
 ${sourceNotes}
@@ -360,6 +384,11 @@ Return JSON only.`;
             );
           }
           if (audited.mapping_explanation) {
+            console.log("AI success - self-audit applied. Output sizes:", {
+              hpi: revisedHPI.length,
+              criteria: missingCriteria.length,
+              mapping: audited.mapping_explanation.length,
+            });
             return new Response(JSON.stringify({
               revised_hpi: revisedHPI,
               missing_criteria: missingCriteria,
@@ -370,6 +399,18 @@ Return JSON only.`;
       } catch { console.warn("Self-audit JSON parse failed, using pre-audit outputs"); }
     }
 
+    // Validate final output completeness
+    if (!revisedHPI || missingCriteria === undefined || !mappingExplanation) {
+      console.error("Incomplete AI output", { hpi: !!revisedHPI, criteria: !!missingCriteria, mapping: !!mappingExplanation });
+      throw new Error("Incomplete AI output. Please try again.");
+    }
+
+    console.log("AI success - pre-audit outputs used. Output sizes:", {
+      hpi: revisedHPI.length,
+      criteria: missingCriteria.length,
+      mapping: mappingExplanation.length,
+    });
+
     return new Response(JSON.stringify({
       revised_hpi: revisedHPI,
       missing_criteria: missingCriteria,
@@ -377,6 +418,10 @@ Return JSON only.`;
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
   } catch (error) {
+    if (error.name === "AbortError") {
+      console.error("AI call timed out after", AI_TIMEOUT_MS, "ms");
+      return errorResponse("AI processing timed out. Please try again with shorter documents.", 504);
+    }
     console.error("Error in optimize-clinical-doc:", error);
     return new Response(
       JSON.stringify({ error: error.message || "An unexpected error occurred." }),

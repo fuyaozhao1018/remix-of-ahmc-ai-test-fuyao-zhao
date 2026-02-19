@@ -1,36 +1,28 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useNavigate, Navigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
+import { useClinical } from "@/contexts/ClinicalContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ArrowLeft, Copy, Check } from "lucide-react";
-import { getSavedResult, ClinicalResult } from "./ClinicalInput";
+import { ArrowLeft, Copy, Check, Download } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Badge } from "@/components/ui/badge";
+import { useState } from "react";
+import AppHeader from "@/components/AppHeader";
 
 const ClinicalOutput = () => {
   const { user, loading } = useAuth();
+  const { result } = useClinical();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const [result, setResult] = useState<ClinicalResult | null>(null);
   const [copied, setCopied] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    const saved = getSavedResult();
-    if (saved) {
-      setResult(saved);
-      return;
+    // Auto-scroll to top on mount
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (result) {
+      toast({ title: "Results generated successfully" });
     }
-    // Fallback: read from localStorage
-    try {
-      const stored = localStorage.getItem("clinical_result");
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (parsed?.revised_hpi && Array.isArray(parsed?.missing_criteria) && parsed?.mapping_explanation) {
-          setResult(parsed);
-        }
-      }
-    } catch {}
   }, []);
 
   if (loading) {
@@ -42,13 +34,17 @@ const ClinicalOutput = () => {
   }
 
   if (!user) return <Navigate to="/auth" replace />;
+
   if (!result) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-background">
-        <p className="text-muted-foreground">No results yet. Please generate a clinical document first.</p>
-        <Button variant="outline" onClick={() => navigate("/clinical-input")}>
-          Go to Input
-        </Button>
+      <div className="min-h-screen bg-background">
+        <AppHeader />
+        <div className="flex flex-col items-center justify-center gap-4 py-20">
+          <p className="text-muted-foreground">No results yet. Please generate a clinical document first.</p>
+          <Button variant="outline" onClick={() => navigate("/clinical-input")}>
+            Go to Input
+          </Button>
+        </div>
       </div>
     );
   }
@@ -85,13 +81,30 @@ const ClinicalOutput = () => {
     }
   };
 
+  const handleDownload = () => {
+    const content = `REVISED HPI\n${"=".repeat(40)}\n${result.revised_hpi}\n\n\nMISSING CRITERIA\n${"=".repeat(40)}\n${missingListText}\n\n\nMAPPING EXPLANATION\n${"=".repeat(40)}\n${result.mapping_explanation}`;
+    const blob = new Blob([content], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "clinical-output.txt";
+    a.click();
+    URL.revokeObjectURL(url);
+    toast({ title: "Downloaded clinical-output.txt" });
+  };
+
   return (
     <div className="min-h-screen bg-background">
+      <AppHeader />
       <div className="mx-auto max-w-3xl px-4 py-8">
-        <div className="mb-6">
+        <div className="mb-6 flex items-center justify-between">
           <Button variant="ghost" size="sm" onClick={() => navigate("/clinical-input")}>
             <ArrowLeft className="mr-2 h-4 w-4" />
             Back to Edit
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleDownload}>
+            <Download className="mr-2 h-4 w-4" />
+            Download
           </Button>
         </div>
 
