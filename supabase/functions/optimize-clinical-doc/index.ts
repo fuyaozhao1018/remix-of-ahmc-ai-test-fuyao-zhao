@@ -101,6 +101,37 @@ function scoreBM25(query: string, chunks: string[], k = 5): string[] {
     .map(s => chunks[s.index]);
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────
+const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
+const MAX_NOTES_CHARS = 15000;
+const MAX_GUIDELINE_CHARS = 80000;
+
+function errorResponse(msg: string, status = 400) {
+  return new Response(JSON.stringify({ error: msg }), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function handleAIStatus(status: number) {
+  if (status === 429) return errorResponse("Rate limit exceeded, please try again later.", 429);
+  if (status === 402) return errorResponse("Payment required. Please add credits.", 402);
+  return null;
+}
+
+async function callAI(apiKey: string, messages: Array<{role: string; content: string}>, temperature = 0.2) {
+  const resp = await fetch(AI_URL, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "google/gemini-2.5-flash",
+      messages,
+      temperature,
+    }),
+  });
+  return resp;
+}
+
 // ─── Main handler ────────────────────────────────────────────────
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -108,13 +139,14 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { notes, pdfBase64, pdfFileName } = await req.json();
+    const { notes, pdfBase64 } = await req.json();
 
     if (!notes || !pdfBase64) {
-      return new Response(
-        JSON.stringify({ error: "notes and pdfBase64 are required" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return errorResponse("notes and pdfBase64 are required");
+    }
+
+    if (notes.length > MAX_NOTES_CHARS) {
+      return errorResponse(`Notes exceed maximum length of ${MAX_NOTES_CHARS} characters.`);
     }
 
     const apiKey = Deno.env.get("LOVABLE_API_KEY");
@@ -128,17 +160,16 @@ Deno.serve(async (req) => {
       guidelineText = parsed.text?.trim();
     } catch (e) {
       console.error("PDF parse error:", e);
-      return new Response(
-        JSON.stringify({ error: "Unable to extract text from PDF." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return errorResponse("Unable to extract text from PDF. The file may be corrupted or password-protected.");
     }
 
     if (!guidelineText) {
-      return new Response(
-        JSON.stringify({ error: "Unable to extract text from PDF." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return errorResponse("Unable to extract text from PDF. The file may contain only images (OCR not supported).");
+    }
+
+    if (guidelineText.length > MAX_GUIDELINE_CHARS) {
+      guidelineText = guidelineText.slice(0, MAX_GUIDELINE_CHARS);
+      console.warn("Guideline text truncated to", MAX_GUIDELINE_CHARS, "chars");
     }
 
     // 2) Chunk guideline text
@@ -151,12 +182,13 @@ Deno.serve(async (req) => {
     // 4A) Call A: Generate Revised HPI
     const hpiPrompt = `You are a clinical documentation improvement specialist.
 
-STRICT RULES:
-- Only use facts EXPLICITLY stated in the doctor's notes below.
-- Do NOT add, infer, or fabricate any clinical findings, diagnoses, or details not present in the notes.
-- Do NOT introduce new diagnoses.
-- Restructure and enhance the language for clinical completeness, using the guideline excerpts to inform structure and emphasis.
-- Output ONLY the revised HPI text. No preamble, no explanation.
+STRICT RULES — VIOLATION OF ANY RULE INVALIDATES YOUR OUTPUT:
+- ONLY use facts EXPLICITLY stated in the doctor's notes below. Every clinical statement must be directly traceable to the notes.
+- Do NOT add, infer, assume, or fabricate ANY clinical findings, diagnoses, lab values, vital signs, symptoms, or details not present in the notes.
+- Do NOT introduce new diagnoses or conditions.
+- Do NOT speculate about patient history, timeline, or severity beyond what is explicitly stated.
+- Restructure and enhance the language for clinical completeness, using the guideline excerpts to inform structure and emphasis ONLY.
+- Output ONLY the revised HPI text. No preamble, no explanation, no headers.
 
 DOCTOR NOTES:
 ${notes}
@@ -167,17 +199,16 @@ ${guidelineExcerpts}
 Respond with ONLY the revised HPI text.`;
 
     // 4B) Call B: Generate Missing Criteria List
-    // Use full guideline text if under 30k chars, otherwise use chunks
     const criteriaContext = guidelineText.length < 30000 ? guidelineText : guidelineExcerpts;
-    const criteriaPrompt = `You are a clinical documentation gap analyst.
+    const criteriaPrompt = `You are a clinical documentation gap analyst. Your output MUST be valid JSON and nothing else.
 
 Analyze the doctor's notes against the MCG guideline and identify criteria that are NOT documented or INSUFFICIENTLY documented.
 
 RULES:
-- Only list criteria that are relevant to the patient's condition as described in the notes.
+- Only list criteria relevant to the patient's condition as described in the notes.
 - "what_to_document" must be guidance for the physician on WHAT to document—it must NOT claim the patient has or doesn't have a condition.
-- "status" must be exactly one of: "Not mentioned", "Insufficient detail", "Unable to determine"
-- Return ONLY valid JSON, no other text.
+- "status" must be EXACTLY one of: "Not mentioned", "Insufficient detail", "Unable to determine"
+- Your entire response must be a single JSON object. No markdown, no code fences, no explanation.
 
 DOCTOR NOTES:
 ${notes}
@@ -185,72 +216,117 @@ ${notes}
 MCG GUIDELINE:
 ${criteriaContext}
 
-Respond with ONLY this JSON format:
+OUTPUT FORMAT (respond with ONLY this JSON, nothing else):
 {"missing_criteria":[{"criterion":"...","status":"Not mentioned","what_to_document":"..."}]}`;
-
-    const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
-    const headers = {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    };
 
     // Run both LLM calls in parallel
     const [hpiResponse, criteriaResponse] = await Promise.all([
-      fetch(AI_URL, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model: "google/gemini-2.5-flash",
-          messages: [{ role: "user", content: hpiPrompt }],
-          temperature: 0.2,
-        }),
-      }),
-      fetch(AI_URL, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model: "google/gemini-2.5-flash",
-          messages: [{ role: "user", content: criteriaPrompt }],
-          temperature: 0.1,
-        }),
-      }),
+      callAI(apiKey, [{ role: "user", content: hpiPrompt }], 0.2),
+      callAI(apiKey, [{ role: "user", content: criteriaPrompt }], 0.1),
     ]);
 
-    if (!hpiResponse.ok) {
-      const status = hpiResponse.status;
-      if (status === 429) return new Response(JSON.stringify({ error: "Rate limit exceeded, please try again later." }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-      if (status === 402) return new Response(JSON.stringify({ error: "Payment required. Please add credits." }), { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-      const errText = await hpiResponse.text();
-      console.error("HPI call error:", errText);
-      throw new Error(`AI Gateway returned ${status} for HPI call`);
-    }
-
-    if (!criteriaResponse.ok) {
-      const status = criteriaResponse.status;
-      if (status === 429) return new Response(JSON.stringify({ error: "Rate limit exceeded, please try again later." }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-      if (status === 402) return new Response(JSON.stringify({ error: "Payment required. Please add credits." }), { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-      const errText = await criteriaResponse.text();
-      console.error("Criteria call error:", errText);
-      throw new Error(`AI Gateway returned ${status} for criteria call`);
+    // Check rate limit / payment errors
+    for (const resp of [hpiResponse, criteriaResponse]) {
+      if (!resp.ok) {
+        const handled = handleAIStatus(resp.status);
+        if (handled) return handled;
+        const errText = await resp.text();
+        console.error("AI call error:", resp.status, errText);
+        throw new Error(`AI Gateway returned ${resp.status}`);
+      }
     }
 
     const hpiData = await hpiResponse.json();
-    const revisedHPI = hpiData.choices?.[0]?.message?.content?.trim() || "";
+    let revisedHPI = hpiData.choices?.[0]?.message?.content?.trim() || "";
 
+    // ── Self-audit guardrail: verify HPI fidelity ──
+    if (revisedHPI) {
+      const auditPrompt = `You are a strict clinical documentation auditor.
+
+Compare the REVISED HPI below against the ORIGINAL DOCTOR NOTES. 
+Remove or correct ANY statement in the revised HPI that is NOT explicitly supported by the original notes.
+Do not add anything new. Only remove unsupported statements and return the cleaned HPI.
+
+If the revised HPI is faithful to the notes, return it unchanged.
+
+ORIGINAL DOCTOR NOTES:
+${notes}
+
+REVISED HPI TO AUDIT:
+${revisedHPI}
+
+Respond with ONLY the cleaned revised HPI text. No preamble, no explanation.`;
+
+      const auditResp = await callAI(apiKey, [{ role: "user", content: auditPrompt }], 0.1);
+      if (auditResp.ok) {
+        const auditData = await auditResp.json();
+        const audited = auditData.choices?.[0]?.message?.content?.trim();
+        if (audited) revisedHPI = audited;
+      } else {
+        console.warn("Self-audit call failed, using unaudited HPI. Status:", auditResp.status);
+      }
+    }
+
+    // ── Parse missing criteria JSON with retry guardrail ──
     const criteriaData = await criteriaResponse.json();
     const criteriaContent = criteriaData.choices?.[0]?.message?.content?.trim() || "";
 
-    // Parse missing criteria JSON
     let missingCriteria: Array<{ criterion: string; status: string; what_to_document: string }> = [];
+    let parsed = false;
+
     try {
       const jsonMatch = criteriaContent.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        missingCriteria = parsed.missing_criteria || [];
+        const obj = JSON.parse(jsonMatch[0]);
+        if (Array.isArray(obj.missing_criteria)) {
+          missingCriteria = obj.missing_criteria;
+          parsed = true;
+        }
       }
     } catch (e) {
-      console.error("Failed to parse criteria JSON:", criteriaContent);
+      console.warn("First criteria parse failed, retrying...");
     }
+
+    // Retry once with stricter instruction if parse failed
+    if (!parsed) {
+      console.log("Retrying missing criteria with stricter prompt...");
+      const retryPrompt = `Your previous response was not valid JSON. You MUST respond with ONLY a JSON object. No markdown code fences. No explanation. No text before or after.
+
+Given these doctor notes and guideline, return missing criteria.
+
+DOCTOR NOTES:
+${notes}
+
+MCG GUIDELINE:
+${criteriaContext}
+
+Respond with EXACTLY this structure and nothing else:
+{"missing_criteria":[{"criterion":"string","status":"Not mentioned","what_to_document":"string"}]}
+
+Your ENTIRE response must start with { and end with }. No other characters.`;
+
+      const retryResp = await callAI(apiKey, [{ role: "user", content: retryPrompt }], 0.0);
+      if (retryResp.ok) {
+        const retryData = await retryResp.json();
+        const retryContent = retryData.choices?.[0]?.message?.content?.trim() || "";
+        try {
+          const jsonMatch = retryContent.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const obj = JSON.parse(jsonMatch[0]);
+            if (Array.isArray(obj.missing_criteria)) {
+              missingCriteria = obj.missing_criteria;
+            }
+          }
+        } catch (e) {
+          console.error("Retry criteria parse also failed:", retryContent);
+        }
+      }
+    }
+
+    // Validate status values
+    const validStatuses = new Set(["Not mentioned", "Insufficient detail", "Unable to determine"]);
+    missingCriteria = missingCriteria
+      .filter(c => c.criterion && c.what_to_document && validStatuses.has(c.status));
 
     // 5) Return combined payload
     const payload = {
@@ -265,7 +341,7 @@ Respond with ONLY this JSON format:
   } catch (error) {
     console.error("Error in optimize-clinical-doc:", error);
     return new Response(
-      JSON.stringify({ error: error.message }),
+      JSON.stringify({ error: error.message || "An unexpected error occurred. Please try again." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
