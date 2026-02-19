@@ -4,15 +4,12 @@ import pdf from "npm:pdf-parse/lib/pdf-parse.js";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
+    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
 // ─── Text chunking ───────────────────────────────────────────────
 function chunkText(text: string, minLen = 400, maxLen = 700): string[] {
-  // Normalize whitespace
   const normalized = text.replace(/\r\n/g, "\n").replace(/[ \t]+/g, " ").trim();
-
-  // Split on paragraph breaks first
   const paragraphs = normalized.split(/\n{2,}/);
   const chunks: string[] = [];
   let current = "";
@@ -20,7 +17,6 @@ function chunkText(text: string, minLen = 400, maxLen = 700): string[] {
   for (const para of paragraphs) {
     const trimmed = para.trim();
     if (!trimmed) continue;
-
     if (current.length + trimmed.length + 1 <= maxLen) {
       current += (current ? "\n\n" : "") + trimmed;
     } else {
@@ -28,7 +24,6 @@ function chunkText(text: string, minLen = 400, maxLen = 700): string[] {
         chunks.push(current);
         current = trimmed;
       } else if (current.length + trimmed.length + 1 <= maxLen * 1.2) {
-        // Allow slight overflow to keep chunk above min
         current += (current ? "\n\n" : "") + trimmed;
       } else {
         if (current) chunks.push(current);
@@ -38,53 +33,41 @@ function chunkText(text: string, minLen = 400, maxLen = 700): string[] {
   }
   if (current) chunks.push(current);
 
-  // If a chunk is still too long, split by sentences
   const final: string[] = [];
   for (const chunk of chunks) {
-    if (chunk.length <= maxLen) {
-      final.push(chunk);
-      continue;
-    }
+    if (chunk.length <= maxLen) { final.push(chunk); continue; }
     const sentences = chunk.split(/(?<=[.!?])\s+/);
     let buf = "";
     for (const s of sentences) {
-      if (buf.length + s.length + 1 <= maxLen) {
-        buf += (buf ? " " : "") + s;
-      } else {
-        if (buf) final.push(buf);
-        buf = s;
-      }
+      if (buf.length + s.length + 1 <= maxLen) { buf += (buf ? " " : "") + s; }
+      else { if (buf) final.push(buf); buf = s; }
     }
     if (buf) final.push(buf);
   }
-
   return final;
 }
 
-// ─── Simple BM25-like keyword scoring (no embeddings API needed) ─
+// ─── BM25-like scoring ──────────────────────────────────────────
 function tokenize(text: string): string[] {
   return text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(t => t.length > 2);
 }
 
-function scoreBM25(query: string, chunks: string[], k = 5): string[] {
+function scoreBM25(query: string, chunks: string[], k = 6): string[] {
   const qTokens = tokenize(query);
   const N = chunks.length;
+  if (N === 0) return [];
   const avgDl = chunks.reduce((s, c) => s + tokenize(c).length, 0) / N;
-
-  // Document frequency
   const df: Record<string, number> = {};
   const chunkTokensList = chunks.map(c => tokenize(c));
   for (const tokens of chunkTokensList) {
     const seen = new Set(tokens);
     for (const t of seen) df[t] = (df[t] || 0) + 1;
   }
-
   const k1 = 1.5, b = 0.75;
   const scores = chunkTokensList.map((tokens, i) => {
     const dl = tokens.length;
     const tf: Record<string, number> = {};
     for (const t of tokens) tf[t] = (tf[t] || 0) + 1;
-
     let score = 0;
     for (const qt of qTokens) {
       if (!tf[qt]) continue;
@@ -94,11 +77,7 @@ function scoreBM25(query: string, chunks: string[], k = 5): string[] {
     }
     return { index: i, score };
   });
-
-  return scores
-    .sort((a, b) => b.score - a.score)
-    .slice(0, k)
-    .map(s => chunks[s.index]);
+  return scores.sort((a, b) => b.score - a.score).slice(0, k).map(s => chunks[s.index]);
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
@@ -108,8 +87,7 @@ const MAX_GUIDELINE_CHARS = 80000;
 
 function errorResponse(msg: string, status = 400) {
   return new Response(JSON.stringify({ error: msg }), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    status, headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
 }
 
@@ -119,18 +97,38 @@ function handleAIStatus(status: number) {
   return null;
 }
 
-async function callAI(apiKey: string, messages: Array<{role: string; content: string}>, temperature = 0.2) {
-  const resp = await fetch(AI_URL, {
+async function callAI(apiKey: string, messages: Array<{ role: string; content: string }>, temperature = 0.2) {
+  return fetch(AI_URL, {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "google/gemini-2.5-flash",
-      messages,
-      temperature,
-    }),
+    body: JSON.stringify({ model: "google/gemini-2.5-flash", messages, temperature }),
   });
-  return resp;
 }
+
+async function extractAIText(resp: Response): Promise<string> {
+  const data = await resp.json();
+  return data.choices?.[0]?.message?.content?.trim() || "";
+}
+
+async function parsePdfBase64(base64: string, label: string): Promise<string> {
+  const buf = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  try {
+    const parsed = await pdf(buf);
+    const text = parsed.text?.trim();
+    if (!text) throw new Error("empty");
+    return text;
+  } catch (e) {
+    throw new Error(`Unable to extract text from ${label} PDF. The file may be corrupted, password-protected, or image-only.`);
+  }
+}
+
+const SYSTEM_PROMPT = `You are a clinical documentation optimization and compliance auditing assistant.
+You are NOT a diagnostic system.
+Use ONLY information explicitly present in the provided source notes.
+Do NOT invent, infer, assume, or add medical facts.
+Do NOT introduce new diagnoses or contradict the notes.
+If a detail is missing, mark it as not documented or unable to determine.
+Treat the MCG guideline clauses as mandatory admission documentation criteria.`;
 
 // ─── Main handler ────────────────────────────────────────────────
 Deno.serve(async (req) => {
@@ -139,209 +137,249 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { notes, pdfBase64 } = await req.json();
+    const body = await req.json();
+    const { erText, erPdfBase64, hpPdfBase64, mcgPdfBase64 } = body;
 
-    if (!notes || !pdfBase64) {
-      return errorResponse("notes and pdfBase64 are required");
-    }
-
-    if (notes.length > MAX_NOTES_CHARS) {
-      return errorResponse(`Notes exceed maximum length of ${MAX_NOTES_CHARS} characters.`);
-    }
+    // Validate inputs
+    if (!erText && !erPdfBase64) return errorResponse("ER Notes (text or PDF) are required.");
+    if (!hpPdfBase64) return errorResponse("Inpatient H&P PDF is required.");
+    if (!mcgPdfBase64) return errorResponse("MCG Guideline PDF is required.");
 
     const apiKey = Deno.env.get("LOVABLE_API_KEY");
     if (!apiKey) throw new Error("LOVABLE_API_KEY not configured");
 
-    // 1) Extract text from PDF
-    const pdfBuffer = Uint8Array.from(atob(pdfBase64), c => c.charCodeAt(0));
-    let guidelineText: string;
-    try {
-      const parsed = await pdf(pdfBuffer);
-      guidelineText = parsed.text?.trim();
-    } catch (e) {
-      console.error("PDF parse error:", e);
-      return errorResponse("Unable to extract text from PDF. The file may be corrupted or password-protected.");
+    // 1) Acquire ER Notes text
+    let erNotesText = "";
+    if (erText) {
+      erNotesText = erText.trim();
+    } else {
+      erNotesText = await parsePdfBase64(erPdfBase64, "ER Notes");
     }
 
-    if (!guidelineText) {
-      return errorResponse("Unable to extract text from PDF. The file may contain only images (OCR not supported).");
+    // 2) Extract H&P text
+    const hpText = await parsePdfBase64(hpPdfBase64, "H&P");
+
+    // 3) Extract MCG text
+    let mcgText = await parsePdfBase64(mcgPdfBase64, "MCG Guideline");
+
+    // Enforce limits
+    const sourceNotes = (erNotesText + "\n\n" + hpText).slice(0, MAX_NOTES_CHARS);
+    if (mcgText.length > MAX_GUIDELINE_CHARS) {
+      mcgText = mcgText.slice(0, MAX_GUIDELINE_CHARS);
+      console.warn("MCG text truncated to", MAX_GUIDELINE_CHARS, "chars");
     }
 
-    if (guidelineText.length > MAX_GUIDELINE_CHARS) {
-      guidelineText = guidelineText.slice(0, MAX_GUIDELINE_CHARS);
-      console.warn("Guideline text truncated to", MAX_GUIDELINE_CHARS, "chars");
-    }
+    // 4) Chunk MCG & retrieve topK
+    const mcgChunks = chunkText(mcgText);
+    const topK = scoreBM25(sourceNotes, mcgChunks, 6);
+    const mcgExcerpts = topK.join("\n\n---\n\n");
+    const mcgForCriteria = mcgText.length < 30000 ? mcgText : mcgExcerpts;
 
-    // 2) Chunk guideline text
-    const chunks = chunkText(guidelineText);
+    // ═══ Prompt A: Revised HPI ═══
+    const hpiPrompt = `MCG excerpts:
+<<<
+${mcgExcerpts}
+>>>
 
-    // 3) Retrieve top-K chunks via BM25 scoring
-    const topK = scoreBM25(notes, chunks, 5);
-    const guidelineExcerpts = topK.join("\n\n---\n\n");
+SOURCE NOTES (ER + H&P):
+<<<
+${sourceNotes}
+>>>
 
-    // 4A) Call A: Generate Revised HPI
-    const hpiPrompt = `You are a clinical documentation improvement specialist.
+Task:
+Rewrite the History of Present Illness (HPI) into a clear, professional, logically organized narrative.
 
-STRICT RULES — VIOLATION OF ANY RULE INVALIDATES YOUR OUTPUT:
-- ONLY use facts EXPLICITLY stated in the doctor's notes below. Every clinical statement must be directly traceable to the notes.
-- Do NOT add, infer, assume, or fabricate ANY clinical findings, diagnoses, lab values, vital signs, symptoms, or details not present in the notes.
-- Do NOT introduce new diagnoses or conditions.
-- Do NOT speculate about patient history, timeline, or severity beyond what is explicitly stated.
-- Restructure and enhance the language for clinical completeness, using the guideline excerpts to inform structure and emphasis ONLY.
-- Output ONLY the revised HPI text. No preamble, no explanation, no headers.
+Requirements:
+- Preserve all documented facts.
+- Improve structure and clarity.
+- Align wording with relevant MCG terms when appropriate.
+- Emphasize documented severity indicators (only if explicitly documented).
+- Do NOT add new facts, symptoms, labs, imaging, diagnoses, or assumptions.
 
-DOCTOR NOTES:
-${notes}
+Output ONLY the revised HPI text.`;
 
-RELEVANT GUIDELINE EXCERPTS:
-${guidelineExcerpts}
+    // ═══ Prompt B: Missing Criteria (strict JSON) ═══
+    const criteriaPrompt = `MCG criteria clauses:
+<<<
+${mcgForCriteria}
+>>>
 
-Respond with ONLY the revised HPI text.`;
+SOURCE NOTES (ER + H&P):
+<<<
+${sourceNotes}
+>>>
 
-    // 4B) Call B: Generate Missing Criteria List
-    const criteriaContext = guidelineText.length < 30000 ? guidelineText : guidelineExcerpts;
-    const criteriaPrompt = `You are a clinical documentation gap analyst. Your output MUST be valid JSON and nothing else.
+Task:
+Compare SOURCE NOTES against the MCG criteria.
+For each MCG clause that is NOT fully supported by the notes, create an entry.
 
-Analyze the doctor's notes against the MCG guideline and identify criteria that are NOT documented or INSUFFICIENTLY documented.
+Statuses:
+- Not documented: not mentioned at all
+- Insufficient detail: mentioned but missing objective specifics
+- Unable to determine: cannot be concluded from the notes
 
-RULES:
-- Only list criteria relevant to the patient's condition as described in the notes.
-- "what_to_document" must be guidance for the physician on WHAT to document—it must NOT claim the patient has or doesn't have a condition.
-- "status" must be EXACTLY one of: "Not mentioned", "Insufficient detail", "Unable to determine"
-- Your entire response must be a single JSON object. No markdown, no code fences, no explanation.
+Return VALID JSON ONLY in this schema:
+{"missing_criteria":[{"mcg_clause":"...","status":"Not documented","evidence_in_notes":"Quote snippet from notes or 'None'","required_documentation":"What objective documentation is needed (do not claim it exists)"}]}
 
-DOCTOR NOTES:
-${notes}
+Rules:
+- Evidence must come directly from SOURCE NOTES or be 'None'.
+- Do NOT invent facts.
+- Do NOT claim the patient meets missing criteria.`;
 
-MCG GUIDELINE:
-${criteriaContext}
-
-OUTPUT FORMAT (respond with ONLY this JSON, nothing else):
-{"missing_criteria":[{"criterion":"...","status":"Not mentioned","what_to_document":"..."}]}`;
-
-    // Run both LLM calls in parallel
-    const [hpiResponse, criteriaResponse] = await Promise.all([
-      callAI(apiKey, [{ role: "user", content: hpiPrompt }], 0.2),
-      callAI(apiKey, [{ role: "user", content: criteriaPrompt }], 0.1),
+    // Run HPI + Criteria in parallel
+    const [hpiResp, criteriaResp] = await Promise.all([
+      callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: hpiPrompt }], 0.2),
+      callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: criteriaPrompt }], 0.1),
     ]);
 
-    // Check rate limit / payment errors
-    for (const resp of [hpiResponse, criteriaResponse]) {
+    for (const resp of [hpiResp, criteriaResp]) {
       if (!resp.ok) {
         const handled = handleAIStatus(resp.status);
         if (handled) return handled;
         const errText = await resp.text();
-        console.error("AI call error:", resp.status, errText);
+        console.error("AI error:", resp.status, errText);
         throw new Error(`AI Gateway returned ${resp.status}`);
       }
     }
 
-    const hpiData = await hpiResponse.json();
-    let revisedHPI = hpiData.choices?.[0]?.message?.content?.trim() || "";
+    let revisedHPI = await extractAIText(hpiResp);
+    const criteriaContent = await extractAIText(criteriaResp);
 
-    // ── Self-audit guardrail: verify HPI fidelity ──
-    if (revisedHPI) {
-      const auditPrompt = `You are a strict clinical documentation auditor.
-
-Compare the REVISED HPI below against the ORIGINAL DOCTOR NOTES. 
-Remove or correct ANY statement in the revised HPI that is NOT explicitly supported by the original notes.
-Do not add anything new. Only remove unsupported statements and return the cleaned HPI.
-
-If the revised HPI is faithful to the notes, return it unchanged.
-
-ORIGINAL DOCTOR NOTES:
-${notes}
-
-REVISED HPI TO AUDIT:
-${revisedHPI}
-
-Respond with ONLY the cleaned revised HPI text. No preamble, no explanation.`;
-
-      const auditResp = await callAI(apiKey, [{ role: "user", content: auditPrompt }], 0.1);
-      if (auditResp.ok) {
-        const auditData = await auditResp.json();
-        const audited = auditData.choices?.[0]?.message?.content?.trim();
-        if (audited) revisedHPI = audited;
-      } else {
-        console.warn("Self-audit call failed, using unaudited HPI. Status:", auditResp.status);
-      }
-    }
-
-    // ── Parse missing criteria JSON with retry guardrail ──
-    const criteriaData = await criteriaResponse.json();
-    const criteriaContent = criteriaData.choices?.[0]?.message?.content?.trim() || "";
-
-    let missingCriteria: Array<{ criterion: string; status: string; what_to_document: string }> = [];
-    let parsed = false;
+    // ── Parse missing criteria with retry ──
+    let missingCriteria: Array<{
+      mcg_clause: string; status: string;
+      evidence_in_notes: string; required_documentation: string;
+    }> = [];
+    let criteriaParsed = false;
 
     try {
-      const jsonMatch = criteriaContent.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const obj = JSON.parse(jsonMatch[0]);
-        if (Array.isArray(obj.missing_criteria)) {
-          missingCriteria = obj.missing_criteria;
-          parsed = true;
-        }
+      const m = criteriaContent.match(/\{[\s\S]*\}/);
+      if (m) {
+        const obj = JSON.parse(m[0]);
+        if (Array.isArray(obj.missing_criteria)) { missingCriteria = obj.missing_criteria; criteriaParsed = true; }
       }
-    } catch (e) {
-      console.warn("First criteria parse failed, retrying...");
-    }
+    } catch { console.warn("First criteria parse failed, retrying..."); }
 
-    // Retry once with stricter instruction if parse failed
-    if (!parsed) {
-      console.log("Retrying missing criteria with stricter prompt...");
-      const retryPrompt = `Your previous response was not valid JSON. You MUST respond with ONLY a JSON object. No markdown code fences. No explanation. No text before or after.
-
-Given these doctor notes and guideline, return missing criteria.
-
-DOCTOR NOTES:
-${notes}
-
-MCG GUIDELINE:
-${criteriaContext}
-
-Respond with EXACTLY this structure and nothing else:
-{"missing_criteria":[{"criterion":"string","status":"Not mentioned","what_to_document":"string"}]}
-
-Your ENTIRE response must start with { and end with }. No other characters.`;
-
-      const retryResp = await callAI(apiKey, [{ role: "user", content: retryPrompt }], 0.0);
+    if (!criteriaParsed) {
+      const retryPrompt = `Your previous response was not valid JSON. Respond with ONLY a JSON object.
+DOCTOR NOTES:\n${sourceNotes}\nMCG GUIDELINE:\n${mcgForCriteria}
+Respond EXACTLY: {"missing_criteria":[{"mcg_clause":"...","status":"Not documented","evidence_in_notes":"...","required_documentation":"..."}]}`;
+      const retryResp = await callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: retryPrompt }], 0.0);
       if (retryResp.ok) {
-        const retryData = await retryResp.json();
-        const retryContent = retryData.choices?.[0]?.message?.content?.trim() || "";
+        const retryText = await extractAIText(retryResp);
         try {
-          const jsonMatch = retryContent.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const obj = JSON.parse(jsonMatch[0]);
-            if (Array.isArray(obj.missing_criteria)) {
-              missingCriteria = obj.missing_criteria;
-            }
-          }
-        } catch (e) {
-          console.error("Retry criteria parse also failed:", retryContent);
-        }
+          const m = retryText.match(/\{[\s\S]*\}/);
+          if (m) { const obj = JSON.parse(m[0]); if (Array.isArray(obj.missing_criteria)) missingCriteria = obj.missing_criteria; }
+        } catch { console.error("Retry parse also failed"); }
       }
     }
 
-    // Validate status values
-    const validStatuses = new Set(["Not mentioned", "Insufficient detail", "Unable to determine"]);
-    missingCriteria = missingCriteria
-      .filter(c => c.criterion && c.what_to_document && validStatuses.has(c.status));
+    // Validate statuses
+    const validStatuses = new Set(["Not documented", "Insufficient detail", "Unable to determine"]);
+    missingCriteria = missingCriteria.filter(c => c.mcg_clause && validStatuses.has(c.status));
 
-    // 5) Return combined payload
-    const payload = {
+    // ═══ Prompt C: Mapping Explanation ═══
+    const mappingPrompt = `MCG criteria clauses:
+<<<
+${mcgForCriteria}
+>>>
+
+SOURCE NOTES (ER + H&P):
+<<<
+${sourceNotes}
+>>>
+
+Missing criteria JSON:
+<<<
+${JSON.stringify(missingCriteria)}
+>>>
+
+Task:
+Write a clear explanation that maps MCG clauses to documentation evidence.
+
+Requirements:
+- For each missing item, explain:
+  (1) the MCG clause,
+  (2) whether there is any supporting evidence in the notes (or explicitly state 'not documented'),
+  (3) why it is missing/insufficient,
+  (4) what documentation would be needed.
+- Keep it audit-ready and traceable.
+- Do NOT invent facts.
+
+Output only the explanation text.`;
+
+    const mappingResp = await callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: mappingPrompt }], 0.2);
+    if (!mappingResp.ok) {
+      const handled = handleAIStatus(mappingResp.status);
+      if (handled) return handled;
+      throw new Error(`AI Gateway returned ${mappingResp.status}`);
+    }
+    const mappingExplanation = await extractAIText(mappingResp);
+
+    // ═══ Prompt D: Self-Audit ═══
+    const auditPrompt = `SOURCE NOTES:
+<<<
+${sourceNotes}
+>>>
+
+Generated Revised HPI:
+<<<
+${revisedHPI}
+>>>
+
+Generated Missing Criteria JSON:
+<<<
+${JSON.stringify(missingCriteria)}
+>>>
+
+Generated Explanation:
+<<<
+${mappingExplanation}
+>>>
+
+Task:
+Remove or revise any statement that is not explicitly supported by SOURCE NOTES.
+If unsupported, either delete it or replace it with 'not documented' language.
+
+Return corrected outputs in JSON:
+{"revised_hpi":"...","missing_criteria":[...],"mapping_explanation":"..."}
+
+Return JSON only.`;
+
+    const auditResp = await callAI(apiKey, [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: auditPrompt }], 0.1);
+    if (auditResp.ok) {
+      const auditText = await extractAIText(auditResp);
+      try {
+        const m = auditText.match(/\{[\s\S]*\}/);
+        if (m) {
+          const audited = JSON.parse(m[0]);
+          if (audited.revised_hpi) revisedHPI = audited.revised_hpi;
+          if (Array.isArray(audited.missing_criteria)) {
+            missingCriteria = audited.missing_criteria.filter(
+              (c: any) => c.mcg_clause && validStatuses.has(c.status)
+            );
+          }
+          if (audited.mapping_explanation) {
+            return new Response(JSON.stringify({
+              revised_hpi: revisedHPI,
+              missing_criteria: missingCriteria,
+              mapping_explanation: audited.mapping_explanation,
+            }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+          }
+        }
+      } catch { console.warn("Self-audit JSON parse failed, using pre-audit outputs"); }
+    }
+
+    return new Response(JSON.stringify({
       revised_hpi: revisedHPI,
       missing_criteria: missingCriteria,
-      debug: { top_k_chunks: topK },
-    };
+      mapping_explanation: mappingExplanation,
+    }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-    return new Response(JSON.stringify(payload), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
   } catch (error) {
     console.error("Error in optimize-clinical-doc:", error);
     return new Response(
-      JSON.stringify({ error: error.message || "An unexpected error occurred. Please try again." }),
+      JSON.stringify({ error: error.message || "An unexpected error occurred." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
