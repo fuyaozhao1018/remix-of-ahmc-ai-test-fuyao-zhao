@@ -192,33 +192,25 @@ function factsExtractionPrompt(sourceNotes: string): string {
 ${sourceNotes}
 >>>
 
-Task: Extract structured facts from the source notes ONLY. Output STRICT JSON matching this schema exactly. If a field is not documented, use an empty string "" or empty array []. NEVER invent facts.
+Task: Extract structured facts from the source notes ONLY, focused on what is needed for admission justification. Output STRICT JSON matching this schema exactly. If a field is not documented, use null or empty array []. NEVER invent facts.
 
 {
-  "patient": { "age": "", "sex": "", "language": "", "pmh": [] },
-  "timeline": [],
-  "symptoms_positive": [],
-  "symptoms_negative": [],
-  "outpatient_tx": [],
-  "vitals": {
-    "bp": "", "hr": "", "rr": "", "temp": "",
-    "spo2_ra": "", "spo2_on_o2": "",
-    "o2_device": "", "o2_flow": ""
-  },
-  "exam": [],
-  "imaging": [],
-  "labs": [],
-  "workup": [],
-  "treatments_in_ed": [],
-  "assessment_terms_documented": [],
-  "disposition": {
-    "admitted": false,
-    "reason_documented": []
-  }
+  "demographics": "age, sex, relevant PMH in one line",
+  "symptom_timeline": "chief complaint with onset, duration, and progression",
+  "key_positives": ["symptom or finding that supports admission"],
+  "objective_vitals": ["relevant vital signs with values"],
+  "oxygen_requirement": "SpO2 value and any supplemental O2 details, or null",
+  "imaging_key_findings": ["key imaging results with interpretation from notes"],
+  "labs_key_findings": ["key lab results with values"],
+  "ed_treatments": ["treatments administered in ED"],
+  "outpatient_failure": "description of prior outpatient treatment and failure, or null",
+  "assessment_terms_documented": ["diagnosis terms used in the notes"],
+  "disposition": "admission status and documented reason"
 }
 
 Rules:
-- Use ONLY source notes. If missing → empty string / empty array.
+- Use ONLY source notes. If missing, use null or empty array.
+- For imaging and labs, include the actual values/findings from the notes.
 - Never invent facts.
 - Return ONLY the JSON object, no other text.`;
 }
@@ -236,32 +228,32 @@ ${mcgExcerpts}
 
 Task: Generate a CONCISE, payer-friendly Revised History of Present Illness (HPI) using ONLY the extracted facts above.
 
-LENGTH: 6-10 sentences total, under 1500 characters. Every sentence must support medical necessity.
+LENGTH: 6-10 sentences total, under 1500 characters.
 
-REQUIRED CONTENT (weave into a single narrative paragraph):
-- Chief complaint and duration
-- Key associated symptoms directly relevant to the primary diagnosis
-- Outpatient treatment and its failure (if documented)
-- Objective ED findings relevant to severity (SpO2, oxygen requirement, RR if abnormal)
-- Clinical INTERPRETATIONS supported by the notes:
-  * Imaging interpretation (e.g., "CXR findings suggest right lower lobe pneumonia" if notes show infiltrate)
-  * Lab interpretation (e.g., "leukocytosis with neutrophilic predominance suggests acute bacterial infection" if labs show WBC elevation + neutrophilia)
-  * Oxygen interpretation (e.g., "documented hypoxemia requiring supplemental oxygen" if SpO2 drops and O2 is given)
-  IMPORTANT: Only write interpretations directly supported by the provided notes. Never invent.
-- ED treatments that support need for admission
-- End with a concise "In summary" or "Therefore" sentence tying risks + objective findings to inpatient-level need. Example pattern: "In summary, [patient description] with [progressive symptoms], [failed outpatient therapy], [documented objective findings], and [evidence of acute condition] warrants inpatient-level management."
+STRUCTURE (weave ALL into ONE continuous paragraph, no headers):
+1. Open with demographics + chief complaint + duration + progression.
+2. Mention key associated symptoms relevant to the primary diagnosis.
+3. If documented, state outpatient treatment and its failure.
+4. State objective ED findings: SpO2/oxygen requirement, abnormal vitals.
+5. Include clinical INTERPRETATIONS only when directly supported by the notes. Use audit-friendly qualifiers:
+   - Imaging: "CXR showed findings concerning for / consistent with [condition]" (only if notes describe infiltrate, opacity, etc.)
+   - Labs: "Labs showed leukocytosis with [neutrophilia/left shift], consistent with an acute infectious process" (only if WBC elevation documented)
+   - Oxygen: "Documented hypoxemia requiring supplemental oxygen" (only if SpO2 drop + O2 administration documented)
+   - If the notes explicitly state a diagnosis (e.g., "acute hypoxic respiratory failure"), include it. Otherwise do NOT invent diagnoses.
+   - For elevated BUN without explicit dehydration diagnosis, say "BUN elevated; volume status should be assessed" rather than "suggesting dehydration".
+6. Mention ED treatments that support inpatient need (IV antibiotics, oxygen, etc.).
+7. End with a concise "In summary" sentence tying together: progressive/worsening symptoms, failed outpatient therapy (if any), documented hypoxemia/O2 requirement, imaging evidence, lab evidence, and need for inpatient monitoring/treatment.
 
 MUST EXCLUDE:
-- Negative ROS or denial statements (no "denies chest pain", "denies fever") UNLESS they directly support medical necessity for the primary diagnosis
-- Normal exam checklists or laundry lists of unremarkable findings (no "no cervical tenderness, no AROM pain, no CVAT, no murmur" etc.)
-- If needed, use ONE short sentence: "Other exam findings were unremarkable as documented."
-- Any facts not explicitly present in the extracted JSON
+- Negative ROS or denial statements ("denies chest pain", "denies fever") unless directly supporting medical necessity for the primary diagnosis.
+- Normal exam checklists or laundry lists ("no cervical tenderness, no AROM pain, no CVAT, no murmur, no ectopy, no LAD").
+- If needed, use ONE sentence: "Other exam findings were unremarkable as documented."
+- Any facts not in the extracted JSON. Never speculate or infer new diagnoses.
 
-FORMAT RULES:
-- Return ONE PARAGRAPH of continuous narrative text only.
+FORMAT:
+- ONE PARAGRAPH of continuous narrative text only.
 - No headings, no section labels, no bullet points, no Markdown, no asterisks, no bold, no line breaks.
-- Plain text only.
-- Use smooth sentence transitions to connect the content naturally.
+- Plain text only. Use smooth sentence transitions.
 
 Output ONLY the revised HPI text as one paragraph.`;
 }
@@ -315,26 +307,33 @@ MISSING CRITERIA JSON:
 ${missingCriteriaJSON}
 >>>
 
-Task: Write a clear, audit-ready explanation for EACH missing criterion, in the SAME ORDER and SAME NUMBERING as the missing_criteria JSON array.
+Task: Write a clear, audit-ready explanation for EACH missing criterion. Number them sequentially (1, 2, 3...) matching the missing_criteria JSON array order.
 
-Use this EXACT template for each item (number them 1, 2, 3... matching the array order):
+For each item, write EXACTLY these 5 labeled lines:
 
-[number]. Clause: <mcg_clause text>
-Status: <status value>
-Evidence from notes: "<direct quote from source notes>" (or "None")
-Why missing/insufficient: <1-2 sentences explaining the gap>
-Needed documentation: <1 sentence stating what is required>
+[number]. Clause: [the mcg_clause text]
+Status: [the status value]
+Evidence from notes: "[direct quote from source notes]" (or "None")
+Why missing/insufficient: [1-2 sentences explaining the gap between what the clause requires and what the notes contain]
+Needed documentation: [1 sentence stating what specific documentation is required]
 
-Separate each item with a line containing only three dashes: ---
+After each item (except the last), write a line containing ONLY three dashes: ---
+
+Example format:
+1. Clause: Patient requires IV medication administration
+Status: Insufficient detail
+Evidence from notes: "Started on ceftriaxone"
+Why missing/insufficient: The notes mention antibiotic administration but do not specify the route (IV vs oral) or the clinical rationale for IV over oral therapy.
+Needed documentation: Document that IV antibiotics are required due to inability to tolerate oral medications or severity of infection.
+---
+2. Clause: ...
 
 Rules:
-- Number each item sequentially (1, 2, 3...) matching the missing_criteria array index.
-- Follow the template exactly for every item. Do not skip any field.
-- Evidence must be a direct quote from the source notes in quotes, or exactly "None".
+- Follow the 5-line template exactly for every item. Do not skip any field.
+- Evidence must be a direct short quote from the source notes in quotes, or exactly "None".
 - Do not fabricate numeric thresholds unless they appear in the MCG text.
-- Every statement must be traceable to source notes or the missing criteria list.
 - Plain text only. No Markdown. No bullets. No asterisks. No bold. No headings. No backticks.
-- Keep each explanation concise: 3-4 sentences per item maximum.
+- Keep each explanation concise.
 
 Output ONLY the explanation text.`;
 }
@@ -439,7 +438,7 @@ Deno.serve(async (req) => {
     }
     const factsRaw = await extractAIText(factsResp);
     const factsObj = extractJSON(factsRaw);
-    if (!factsObj || !factsObj.patient) {
+    if (!factsObj || (!factsObj.demographics && !factsObj.patient)) {
       console.error("Stage 0: Failed to parse facts JSON. Raw:", factsRaw.slice(0, 500));
       throw new Error("Failed to extract structured facts from notes. Please try again.");
     }
@@ -551,9 +550,10 @@ Respond EXACTLY: {"missing_criteria":[{"mcg_clause":"...","status":"Not document
           );
         }
         if (audited.mapping_explanation) {
+          // Use audited mapping instead of pre-audit
           revisedHPI = sanitizeHPI(revisedHPI);
-          const sanitizedMapping = sanitizeMapping(audited.mapping_explanation);
           missingCriteria = sanitizeCriteria(missingCriteria);
+          const sanitizedMapping = sanitizeMapping(audited.mapping_explanation);
           console.log("Stage 5 complete. Self-audit applied. Output sizes:", {
             hpi: revisedHPI.length,
             criteria: missingCriteria.length,
