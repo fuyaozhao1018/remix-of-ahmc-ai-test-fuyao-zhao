@@ -17,7 +17,20 @@ const ClinicalOutput = () => {
 
   useEffect(() => {
     const saved = getSavedResult();
-    if (saved) setResult(saved);
+    if (saved) {
+      setResult(saved);
+      return;
+    }
+    // Fallback: read from localStorage
+    try {
+      const stored = localStorage.getItem("clinical_result");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed?.revised_hpi && Array.isArray(parsed?.missing_criteria) && parsed?.mapping_explanation) {
+          setResult(parsed);
+        }
+      }
+    } catch {}
   }, []);
 
   if (loading) {
@@ -29,7 +42,16 @@ const ClinicalOutput = () => {
   }
 
   if (!user) return <Navigate to="/auth" replace />;
-  if (!result) return <Navigate to="/clinical-input" replace />;
+  if (!result) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-background">
+        <p className="text-muted-foreground">No results yet. Please generate a clinical document first.</p>
+        <Button variant="outline" onClick={() => navigate("/clinical-input")}>
+          Go to Input
+        </Button>
+      </div>
+    );
+  }
 
   const copyToClipboard = async (text: string, key: string) => {
     await navigator.clipboard.writeText(text);
