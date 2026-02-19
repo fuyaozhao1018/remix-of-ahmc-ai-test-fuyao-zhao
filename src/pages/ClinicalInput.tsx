@@ -151,9 +151,12 @@ const ClinicalInput = () => {
       clearInterval(progressInterval);
 
       if (fnError) throw fnError;
-      if (data?.error) throw new Error(data.error);
 
-      const result: ClinicalResult = data;
+      // Handle case where data comes back as string
+      const parsed = typeof data === "string" ? JSON.parse(data) : data;
+      if (parsed?.error) throw new Error(parsed.error);
+
+      const result: ClinicalResult = parsed;
       savedResult = result;
       navigate("/clinical-output");
     } catch (err: any) {
