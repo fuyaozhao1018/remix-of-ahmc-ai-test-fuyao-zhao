@@ -2,17 +2,7 @@
 
 ## Project info
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
-
-## How can I edit this code?
-
-There are several ways of editing your application.
-
-**Use Lovable**
-
-Simply visit the [Lovable Project](https://ahmc-fuyao-spark.lovable.app) and start prompting.
-
-Changes made via Lovable will be committed automatically to this repo.
+**URL**: https://ahmc-fuyao-spark.lovable.app
 
 **Use your preferred IDE**
 
